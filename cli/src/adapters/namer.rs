@@ -1,6 +1,7 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 /// 名付けの結果
@@ -46,35 +47,37 @@ impl ClaudeCliNamer {
             .spawn()
             .ok()?;
         let prompt = build_prompt(material);
-        let mut stdin = child.stdin.take()?;
-        let mut stdout = child.stdout.take()?;
-        // 書き込みと読み出しは別スレッドで行い、パイプが詰まっても固まらないようにする
-        let writer = std::thread::spawn(move || {
+        let (Some(mut stdin), Some(mut stdout)) = (child.stdin.take(), child.stdout.take()) else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        };
+        // 書き込みと読み出しは別スレッドで行い、パイプが詰まっても固まらないようにする。
+        // どちらのスレッドも待たない（孫プロセスがパイプを握っていると終わらないことがある）
+        std::thread::spawn(move || {
             let _ = stdin.write_all(prompt.as_bytes());
         });
-        let reader = std::thread::spawn(move || {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
             let mut buf = Vec::new();
-            let _ = stdout.read_to_end(&mut buf);
-            buf
+            let read = stdout.read_to_end(&mut buf).map(|_| buf);
+            let _ = tx.send(read);
         });
         let deadline = Instant::now() + self.timeout;
         let status = loop {
             match child.try_wait() {
                 Ok(Some(status)) => break Some(status),
-                Ok(None) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                _ => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break None;
-                }
+                Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+                _ => break None,
             }
         };
-        // タイムアウト時は孫プロセスがパイプを握っていても待たずに戻る
-        let status = status?;
-        let _ = writer.join();
-        let out = reader.join().ok()?;
+        // 本体が終わっても、標準出力が閉じるのを待つのは残り時間まで
+        let out = status.and_then(|_| rx.recv_timeout(deadline.saturating_duration_since(Instant::now())).ok());
+        let (Some(status), Some(Ok(out))) = (status, out) else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        };
         if !status.success() {
             return None;
         }
@@ -249,6 +252,16 @@ mod tests {
         assert!(t.elapsed() < Duration::from_secs(2));
         let ok = script(&dir, "ok.sh", "cat >/dev/null\nprintf '認証の実装'");
         assert_eq!(mk(ok, 2000).name("m"), NameOutcome::Named("認証の実装".into()));
+        // 本体はすぐ終わるが、孫プロセスが標準出力を握ったまま残る
+        let held = script(&dir, "held.sh", "cat >/dev/null\nsleep 5 &\nprintf '認証の実装'");
+        let t = Instant::now();
+        assert_eq!(mk(held, 300).name("m"), NameOutcome::Unavailable);
+        assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+        // 本体が標準入力を読まずに止まっていても、時間内に戻る
+        let stuck = script(&dir, "stuck.sh", "sleep 5");
+        let t = Instant::now();
+        assert_eq!(mk(stuck, 300).name(&"x".repeat(1 << 20)), NameOutcome::Unavailable);
+        assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
         let fail = script(&dir, "fail.sh", "cat >/dev/null\nprintf 'x'\nexit 1");
         assert_eq!(mk(fail, 2000).name("m"), NameOutcome::Unavailable);
         let unusable = script(&dir, "unusable.sh", "cat >/dev/null\nprintf '一\\n二\\n'");
