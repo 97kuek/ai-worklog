@@ -15,11 +15,13 @@ import { renderCalendar } from "./calendar.js";
 import { renderBoard } from "./board.js";
 import { showTitle, editTaskTitle } from "./title-editor.js";
 import { renderDetail } from "./detail.js";
+import { renderClaudeUsage } from "./claude-usage.js";
+import type { AccountUsage } from "./claude-accounts.js";
 import { renderStats } from "./stats.js";
 import { renderSettings, type RunnerSettings } from "./settings.js";
 import { renderSkills, type Skill } from "./skills.js";
 
-const pages = { log: "Work log", calendar: "Calendar", board: "Board", stats: "Activity", skills: "Skills", office: "Office", settings: "Settings" };
+const pages = { log: "Work log", calendar: "Calendar", board: "Board", stats: "Activity", usage: "Claude usage", skills: "Skills", office: "Office", settings: "Settings" };
 type View = keyof typeof pages;
 function node<T extends HTMLElement>(id: string) {
   return document.getElementById(id) as T;
@@ -43,10 +45,12 @@ const filters: LogFilters = { day: null, status: "", newest: true };
 let request: AbortController | undefined;
 let detailRequest: AbortController | undefined;
 let officeModule: typeof import("./office.js") | undefined;
-let officeTimer: number | undefined;
-function scheduleOfficeRefresh() {
-  window.clearTimeout(officeTimer);
-  if (view === "office" && !document.hidden) officeTimer = window.setTimeout(() => void load(), 15000);
+const LIVE_REFRESH_MS = 15_000;
+const liveView = () => view === "office" || view === "usage";
+let liveTimer: number | undefined;
+function scheduleLiveRefresh() {
+  window.clearTimeout(liveTimer);
+  if (liveView() && !document.hidden) liveTimer = window.setTimeout(() => void load(), LIVE_REFRESH_MS);
 }
 let refreshBoard: ReturnType<typeof renderBoard> | undefined;
 let pollingBoard: typeof refreshBoard;
@@ -193,6 +197,9 @@ async function complete(id: string) {
   }
   if (view === "board") await load("Task completed.");
 }
+function hasDateRange() {
+  return view === "log" || view === "calendar" || view === "stats";
+}
 function syncHead() {
   document.title = pages[view] + " | Taskfolio";
   node("title").textContent = pages[view];
@@ -200,7 +207,7 @@ function syncHead() {
     if (a.hash === "#" + view) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   }
-  node("week-controls").hidden = view === "board" || view === "skills" || view === "office" || view === "settings";
+  node("week-controls").hidden = !hasDateRange();
   node("stats-period").hidden = view !== "stats";
   for (const period of ["daily", "weekly"] as const) {
     node(period).setAttribute("aria-pressed", String(statsPeriod === period));
@@ -227,7 +234,7 @@ function syncHead() {
   dateInput.setAttribute("aria-description", fullRange);
 }
 async function load(done = "") {
-  window.clearTimeout(officeTimer);
+  window.clearTimeout(liveTimer);
   window.clearTimeout(boardTimer);
   refreshBoard = undefined;
   delete notice.dataset.boardOffline;
@@ -237,13 +244,13 @@ async function load(done = "") {
   syncHead();
   const start = rangeStart();
   const end = addDays(start, isDaily() ? 1 : 7);
-  const scope = view === "board" || view === "skills" || view === "office" || view === "settings" ? view : view + localDate(start) + localDate(end);
+  const scope = !hasDateRange() ? view : view + localDate(start) + localDate(end);
   root.setAttribute("aria-busy", "true");
   if (displayedScope !== scope) {
     displayedScope = undefined;
     root.replaceChildren();
   }
-  if (!(view === "office" && displayedScope === scope)) notice.textContent = "Loading…";
+  if (!(liveView() && displayedScope === scope)) notice.textContent = "Loading…";
   try {
     if (view === "office") {
       const [module, data] = await Promise.all([
@@ -253,6 +260,10 @@ async function load(done = "") {
       if (controller.signal.aborted) return;
       officeModule = module;
       module.renderOffice(root, data.sessions, showDetail);
+    } else if (view === "usage") {
+      const data = await api<{ accounts: AccountUsage[] }>("/api/claude-usage", { signal: controller.signal });
+      if (controller.signal.aborted) return;
+      renderClaudeUsage(root, data.accounts);
     } else if (view === "settings") {
       const read = () => api<RunnerSettings>("/api/settings", { signal: controller.signal });
       const settings = await read();
@@ -299,12 +310,12 @@ async function load(done = "") {
   } catch (e) {
     if (controller.signal.aborted) return;
     notice.textContent = "";
-    const target = view === "office" && displayedScope === scope ? notice : root;
+    const target = liveView() && displayedScope === scope ? notice : root;
     target.replaceChildren(errorBox(e, () => void load()));
   } finally {
     if (!controller.signal.aborted) {
       root.removeAttribute("aria-busy");
-      scheduleOfficeRefresh();
+      scheduleLiveRefresh();
       scheduleBoardRefresh();
     }
   }
@@ -369,8 +380,8 @@ window.addEventListener("hashchange", () => {
   focusMain();
 });
 document.addEventListener("visibilitychange", () => {
-  if (view === "office") {
-    if (document.hidden) window.clearTimeout(officeTimer);
+  if (liveView()) {
+    if (document.hidden) window.clearTimeout(liveTimer);
     else void load();
   } else if (view === "board") {
     window.clearTimeout(boardTimer);

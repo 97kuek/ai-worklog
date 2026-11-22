@@ -1,3 +1,4 @@
+import { registerClaudeUsageRoutes } from "./routes/claude-usage";
 import { Hono } from "hono";
 import { ConfigError, type Authenticate } from "./auth/identity";
 import { ensureMachine, ensureUser } from "./db/repo";
@@ -57,6 +58,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   registerSettingsRoutes(app, now);
   registerBlockRoutes(app);
   registerSkillRoutes(app);
+  registerClaudeUsageRoutes(app, now);
 
   app.onError((err, c) => {
     if (err instanceof ConfigError) {
