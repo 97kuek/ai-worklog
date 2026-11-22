@@ -1,3 +1,4 @@
+import { planningLanes, type BoardRequest, type SaveRequest } from "./planning.js";
 import { countLabel, el, engineName, stateOf, statusLabel, titleOf, type Session } from "./shared.js";
 
 const lanes = ["running", "waiting", "completed"] as const;
@@ -19,6 +20,8 @@ export function renderBoard(
   sessions: Session[],
   open: (id: string) => void,
   complete: (id: string) => Promise<void>,
+  plans: BoardRequest[],
+  save: SaveRequest,
 ): void {
   const requests = pending.get(root) ?? new Map<string, Promise<void>>();
   pending.set(root, requests);
@@ -27,6 +30,7 @@ export function renderBoard(
   );
   const board = el("div", "worklog-board");
   const columns = el("div", "board-lanes");
+  columns.append(...planningLanes(plans, save, sessions));
   let dragged: (() => void) | undefined;
   function endDrag() {
     dragged = undefined;
@@ -60,70 +64,41 @@ export function renderBoard(
         meta.append(time);
       }
       content.append(action, meta);
-      if (state !== "running") {
-        const label = el("label", "board-check");
-        const checkbox = el("input");
-        checkbox.type = "checkbox";
-        const done = state === "completed";
-        checkbox.checked = done;
-        checkbox.disabled = done;
-        label.title = done ? "Completed" : "Mark complete";
-        checkbox.setAttribute("aria-label", done ? title + " (completed)" : "Mark " + title + " complete");
-        label.append(checkbox);
-        card.append(label);
-        if (!done) {
-          const error = el("p", "board-error");
-          error.setAttribute("role", "alert");
-          content.append(error);
-          async function track(request: Promise<void>) {
-            checkbox.disabled = true;
-            card.draggable = false;
-            card.setAttribute("aria-busy", "true");
-            error.textContent = "";
-            try {
-              await request;
-            } catch (reason) {
-              error.textContent = reason instanceof Error ? reason.message : "Could not mark this task complete.";
-            } finally {
-              if (requests.get(session.id) === request) requests.delete(session.id);
-              checkbox.disabled = false;
-              checkbox.checked = false;
-              card.draggable = true;
-              card.removeAttribute("aria-busy");
-            }
+      if (state === "waiting") {
+        const error = el("p", "board-error");
+        error.setAttribute("role", "alert");
+        content.append(error);
+        async function track(request: Promise<void>) {
+          card.draggable = false;
+          card.setAttribute("aria-busy", "true");
+          error.textContent = "";
+          try {
+            await request;
+          } catch (reason) {
+            error.textContent = reason instanceof Error ? reason.message : "Could not mark this task complete.";
+          } finally {
+            if (requests.get(session.id) === request) requests.delete(session.id);
+            card.draggable = true;
+            card.removeAttribute("aria-busy");
           }
-          const submit = () => {
-            if (requests.has(session.id)) return;
-            const request = Promise.resolve().then(() => complete(session.id));
-            requests.set(session.id, request);
-            void track(request);
-          };
-          checkbox.onchange = () => {
-            const restoreFocus = document.activeElement === checkbox;
-            submit();
-            if (restoreFocus)
-              void requests.get(session.id)?.then(
-                () => {
-                  if (document.activeElement === document.body && !root.contains(board))
-                    root
-                      .querySelector<HTMLButtonElement>('[data-session-id="' + CSS.escape(session.id) + '"]')
-                      ?.focus();
-                },
-                () => checkbox.focus(),
-              );
-          };
-          card.draggable = true;
-          card.ondragstart = (event) => {
-            if (!event.dataTransfer || requests.has(session.id)) return;
-            dragged = submit;
-            event.dataTransfer.effectAllowed = "move";
-            event.dataTransfer.setData("text/plain", title);
-            board.classList.add("is-dragging");
-          };
-          card.ondragend = endDrag;
-          const existing = requests.get(session.id);
-          if (existing) void track(existing);
         }
+        const submit = () => {
+          if (requests.has(session.id)) return;
+          const request = Promise.resolve().then(() => complete(session.id));
+          requests.set(session.id, request);
+          void track(request);
+        };
+        card.draggable = true;
+        card.ondragstart = (event) => {
+          if (!event.dataTransfer || requests.has(session.id)) return;
+          dragged = submit;
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", title);
+          board.classList.add("is-dragging");
+        };
+        card.ondragend = endDrag;
+        const existing = requests.get(session.id);
+        if (existing) void track(existing);
       }
       card.append(content);
       list.append(card);

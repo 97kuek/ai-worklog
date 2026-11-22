@@ -3,7 +3,7 @@
 }
 .board-lanes {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   align-items: start;
   gap: clamp(12px, 2vw, 28px);
 }
@@ -74,25 +74,6 @@
   margin-top: 4px;
   line-height: 1.4;
 }
-.board-check {
-  display: grid;
-  place-items: center;
-  width: 36px;
-  min-height: 40px;
-  flex: none;
-  margin: -8px 1px -8px -7px;
-  cursor: pointer;
-}
-.board-check input {
-  width: 16px;
-  height: 16px;
-  margin: 0;
-  accent-color: var(--accent);
-  cursor: inherit;
-}
-.board-completed .board-check {
-  cursor: default;
-}
 .is-dragging .board-completed {
   outline: 2px dashed var(--accent);
   outline-offset: 3px;
@@ -107,15 +88,30 @@
 .board-error:empty {
   display: none;
 }
-@container (max-width: 660px) {
+@container (max-width: 840px) {
   .board-lanes {
     grid-template-columns: 1fr;
   }
   .board-lane {
     min-height: 0;
   }
-  .board-check {
-    min-width: 44px;
-    min-height: 44px;
-  }
+}
+
+.request-card { display: block; padding: 0; }
+.request-card-button { display: block; width: 100%; min-height: 44px; padding: 14px 16px; border-radius: inherit; color: var(--ink); text-align: start; background: transparent; }
+.request-add { width: 100%; min-height: 44px; border: 1px dashed var(--line-strong); border-radius: 8px; color: var(--ink); margin-bottom: 8px; }
+.request-add:hover { background: var(--paper); }
+.request-dialog { width: min(30rem, calc(100% - 24px)); max-height: calc(100dvh - 24px); overflow: auto; padding: 20px; }
+.request-dialog h2 { margin: 0 0 16px; font-size: var(--type-heading); }
+.request-form, .request-choice { display: grid; gap: 6px; min-width: 0; }
+.request-form textarea { resize: vertical; }
+.request-form textarea, .request-choice input { width: 100%; font: inherit; color: var(--ink); padding: 8px; border: 1px solid var(--line); border-radius: 6px; }
+.request-choice { grid-template-columns: minmax(0, 1fr); }
+.request-choices { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; margin: 8px 0; }
+.request-choice .filter-trigger { min-width: 0; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.request-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+.request-actions button[type=submit] { background: var(--accent); color: var(--white); }
+.board-title, .board-meta { overflow-wrap: anywhere; }
+@media (max-width: 400px) {
+  .request-choices { grid-template-columns: 1fr; }
 }

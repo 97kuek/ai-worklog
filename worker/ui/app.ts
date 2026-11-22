@@ -1,3 +1,4 @@
+import type { BoardRequest } from "./planning.js";
 import {
   addDays,
   el,
@@ -108,6 +109,23 @@ async function showDetail(id: string, block?: Block) {
         return result.session;
       });
       renderDetail(body, data.session, data.blocks, block);
+      if (view === "board" && data.session.observed_status?.state === "waiting" && !data.session.completed_at) {
+        const move = el("button", "small-button", "Move to Completed");
+        const error = el("p", "board-error");
+        error.setAttribute("role", "alert");
+        move.onclick = async () => {
+          move.disabled = true;
+          try {
+            await complete(id);
+            if (!controller.signal.aborted) dialog.close();
+          } catch (e) {
+            error.textContent = message(e);
+          } finally {
+            move.disabled = false;
+          }
+        };
+        body.append(move, error);
+      }
     }
   } catch (e) {
     if (!controller.signal.aborted) {
@@ -200,9 +218,12 @@ async function load(done = "") {
       if (controller.signal.aborted) return;
       renderSkills(root, data.skills);
     } else if (view === "board") {
-      const data = await api<{ sessions: Session[] }>("/api/board", { signal: controller.signal });
+      const data = await api<{ sessions: Session[]; requests: BoardRequest[] }>("/api/board", { signal: controller.signal });
       if (controller.signal.aborted) return;
-      renderBoard(root, data.sessions, showDetail, complete);
+      renderBoard(root, data.sessions, showDetail, complete, data.requests ?? [], (id, change) =>
+        api("/api/board/requests/" + encodeURIComponent(id), {
+          method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(change),
+        }));
     } else {
       const q = new URLSearchParams({ from: start.toISOString(), to: end.toISOString() });
       const data = await api<WeekData>("/api/blocks?" + q, { signal: controller.signal });
