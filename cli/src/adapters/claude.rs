@@ -1,15 +1,19 @@
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-use super::jsonl::for_each_matching_line;
+use super::jsonl::read_matching_lines_from;
 use super::time::parse_ts;
 use crate::domain::{RawSession, TokenEvent, TokenUsage, Tool};
 
 const NEEDLES: &[&str] = &[r#""type":"user""#, r#""type":"assistant""#, r#""type":"custom-title""#];
+const MAX_USER_TEXTS: usize = 3;
+const MAX_USER_TEXT_CHARS: usize = 300;
 
 #[derive(Deserialize)]
 struct Line {
@@ -23,6 +27,8 @@ struct Line {
     request_id: Option<String>,
     #[serde(rename = "customTitle")]
     custom_title: Option<String>,
+    #[serde(rename = "isMeta", default)]
+    is_meta: bool,
     message: Option<Message>,
 }
 
@@ -31,6 +37,22 @@ struct Message {
     id: Option<String>,
     model: Option<String>,
     usage: Option<Usage>,
+    content: Option<Content>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Content {
+    Text(String),
+    Items(Vec<Item>),
+    Other(serde::de::IgnoredAny),
+}
+
+#[derive(Deserialize)]
+struct Item {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    text: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -45,12 +67,27 @@ struct Usage {
     cache_creation_input_tokens: u64,
 }
 
-/// Reads every `<project>/<sessionId>.jsonl` under `projects_dir` as one
-/// session, merging `<project>/<sessionId>/subagents/*.jsonl` into it.
-/// Only sessions where the main file or a subagent file was modified at or
-/// after `modified_since` are read.
-pub fn read_claude_sessions(projects_dir: &Path, modified_since: SystemTime) -> Vec<RawSession> {
-    let mut sessions = Vec::new();
+/// 1つのファイルから読んだ分の途中結果。state ファイルに保存して続きから読むために使う
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ClaudeFileState {
+    /// このファイルから読んだ分だけ
+    pub raw: RawSession,
+    /// (message.id, requestId) のハッシュ
+    pub seen: HashSet<u64>,
+    /// 作業名の材料。main のファイルだけ、最大3件、各300文字まで
+    pub user_texts: Vec<String>,
+}
+
+pub struct ClaudeFile {
+    pub path: PathBuf,
+    pub session_id: String,
+    pub is_main: bool,
+}
+
+/// Lists every `<project>/<sessionId>.jsonl` under `projects_dir`, each followed
+/// by its `<project>/<sessionId>/subagents/*.jsonl`.
+pub fn list_claude_files(projects_dir: &Path) -> Vec<ClaudeFile> {
+    let mut files = Vec::new();
     for project in read_dir_paths(projects_dir).into_iter().filter(|p| p.is_dir()) {
         for main in read_dir_paths(&project) {
             if main.extension().is_none_or(|e| e != "jsonl") {
@@ -59,81 +96,132 @@ pub fn read_claude_sessions(projects_dir: &Path, modified_since: SystemTime) -> 
             let Some(id) = main.file_stem().and_then(|s| s.to_str()).map(str::to_owned) else {
                 continue;
             };
-            let subagents: Vec<PathBuf> = read_dir_paths(&project.join(&id).join("subagents"))
+            let subagents = read_dir_paths(&project.join(&id).join("subagents"))
                 .into_iter()
-                .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
-                .collect();
-            if !std::iter::once(&main).chain(&subagents).any(|p| modified_at_or_after(p, modified_since)) {
-                continue;
-            }
-            let mut raw = RawSession { tool: Some(Tool::ClaudeCode), native_session_id: id, ..Default::default() };
-            let mut seen = HashSet::new();
-            read_file(&main, &mut raw, &mut seen, true);
-            for sub in &subagents {
-                read_file(sub, &mut raw, &mut seen, false);
-            }
-            sessions.push(raw);
+                .filter(|p| p.extension().is_some_and(|e| e == "jsonl"));
+            files.push(ClaudeFile { path: main, session_id: id.clone(), is_main: true });
+            files.extend(subagents.map(|path| ClaudeFile { path, session_id: id.clone(), is_main: false }));
         }
+    }
+    files
+}
+
+/// Reads every `<project>/<sessionId>.jsonl` under `projects_dir` as one
+/// session, merging `<project>/<sessionId>/subagents/*.jsonl` into it.
+/// Only sessions where the main file or a subagent file was modified at or
+/// after `modified_since` are read.
+pub fn read_claude_sessions(projects_dir: &Path, modified_since: SystemTime) -> Vec<RawSession> {
+    let files = list_claude_files(projects_dir);
+    let mut sessions = Vec::new();
+    let mut i = 0;
+    while i < files.len() {
+        let end = files[i + 1..].iter().position(|f| f.is_main).map_or(files.len(), |n| i + 1 + n);
+        let group = &files[i..end];
+        i = end;
+        if !group.iter().any(|f| modified_at_or_after(&f.path, modified_since)) {
+            continue;
+        }
+        let states: Vec<ClaudeFileState> = group
+            .iter()
+            .map(|f| {
+                let mut st = ClaudeFileState::default();
+                let _ = read_claude_file(f, 0, &mut st);
+                st
+            })
+            .collect();
+        let subs: Vec<&ClaudeFileState> = states[1..].iter().collect();
+        sessions.extend(merge_claude(Some(&states[0]), &subs));
     }
     sessions
 }
 
-fn read_file(path: &Path, raw: &mut RawSession, seen: &mut HashSet<(String, String)>, is_main: bool) {
-    let _ = for_each_matching_line(path, NEEDLES, |bytes| {
+/// from から読み、st に足す。戻り値は新しい読み終えた位置
+pub fn read_claude_file(file: &ClaudeFile, from: u64, st: &mut ClaudeFileState) -> std::io::Result<u64> {
+    if st.raw.tool.is_none() {
+        st.raw.tool = Some(Tool::ClaudeCode);
+        st.raw.native_session_id = file.session_id.clone();
+    }
+    read_matching_lines_from(&file.path, from, NEEDLES, |bytes| {
         let Ok(line) = serde_json::from_slice::<Line>(bytes) else {
             return;
         };
-        match line.kind.as_str() {
-            "custom-title" => {
-                if let Some(t) = line.custom_title {
-                    raw.source_title = Some(t);
-                }
-            }
-            "user" | "assistant" => {
-                let Some(at) = line.timestamp.as_deref().and_then(parse_ts) else {
-                    return;
-                };
-                raw.activity.push(at);
-                if is_main {
-                    // Claude Code records the shell's current directory, which
-                    // moves with `cd`. The first value is where the session
-                    // was started, which is what identifies the project.
-                    if raw.cwd.is_none() {
-                        raw.cwd = line.cwd;
-                    }
-                    if let Some(branch) = line.git_branch {
-                        raw.git_branch = (!branch.is_empty() && branch != "HEAD").then_some(branch);
-                    }
-                }
-                if line.kind == "assistant" {
-                    if let Some(msg) = line.message {
-                        add_assistant_usage(raw, seen, at, line.request_id, msg);
-                    }
-                }
-            }
-            _ => {}
-        }
-    });
+        apply_line(st, file.is_main, line);
+    })
 }
 
-fn add_assistant_usage(
-    raw: &mut RawSession,
-    seen: &mut HashSet<(String, String)>,
-    at: i64,
-    request_id: Option<String>,
-    msg: Message,
-) {
+fn apply_line(st: &mut ClaudeFileState, is_main: bool, line: Line) {
+    let raw = &mut st.raw;
+    match line.kind.as_str() {
+        "custom-title" => {
+            if let Some(t) = line.custom_title {
+                raw.source_title = Some(t);
+            }
+        }
+        "user" | "assistant" => {
+            let Some(at) = line.timestamp.as_deref().and_then(parse_ts) else {
+                return;
+            };
+            raw.activity.push(at);
+            if is_main {
+                // Claude Code records the shell's current directory, which
+                // moves with `cd`. The first value is where the session
+                // was started, which is what identifies the project.
+                if raw.cwd.is_none() {
+                    raw.cwd = line.cwd;
+                }
+                if let Some(branch) = line.git_branch {
+                    raw.git_branch = (!branch.is_empty() && branch != "HEAD").then_some(branch);
+                }
+            }
+            if line.kind == "assistant" {
+                if let Some(msg) = line.message {
+                    add_assistant_usage(st, at, line.request_id, msg);
+                }
+            } else if is_main && !line.is_meta && st.user_texts.len() < MAX_USER_TEXTS {
+                if let Some(text) = line.message.and_then(|m| m.content).and_then(user_text) {
+                    st.user_texts.push(text);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 人が打った文だけを返す。tool_result やコマンドの記録は材料にしない
+fn user_text(content: Content) -> Option<String> {
+    let text = match content {
+        Content::Text(t) => t,
+        Content::Items(items) => items
+            .into_iter()
+            .filter(|i| i.kind.as_deref() == Some("text"))
+            .filter_map(|i| i.text)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Content::Other(_) => return None,
+    };
+    let text = text.trim();
+    if text.is_empty() || text.starts_with("<command-") || text.starts_with("<local-command") {
+        return None;
+    }
+    Some(text.chars().take(MAX_USER_TEXT_CHARS).collect())
+}
+
+fn add_assistant_usage(st: &mut ClaudeFileState, at: i64, request_id: Option<String>, msg: Message) {
     if let Some(model) = msg.model.filter(|m| !m.starts_with('<')) {
-        raw.models.insert(model);
+        st.raw.models.insert(model);
     }
     let Some(u) = msg.usage else {
         return;
     };
     let key = (msg.id.unwrap_or_default(), request_id.unwrap_or_default());
-    if !(key.0.is_empty() && key.1.is_empty()) && !seen.insert(key) {
-        return;
+    if !(key.0.is_empty() && key.1.is_empty()) {
+        let mut h = DefaultHasher::new();
+        key.hash(&mut h);
+        if !st.seen.insert(h.finish()) {
+            return;
+        }
     }
-    raw.token_events.push(TokenEvent {
+    st.raw.token_events.push(TokenEvent {
         at,
         usage: TokenUsage {
             input: u.input_tokens,
@@ -142,6 +230,16 @@ fn add_assistant_usage(
             cache_write: u.cache_creation_input_tokens,
         },
     });
+}
+
+/// 1つのセッションのファイル群（main とサブエージェント）の途中結果をまとめる
+pub fn merge_claude(main: Option<&ClaudeFileState>, subagents: &[&ClaudeFileState]) -> Option<RawSession> {
+    let mut raw = main?.raw.clone();
+    raw.tool = Some(Tool::ClaudeCode);
+    for sub in subagents {
+        raw.absorb(sub.raw.clone());
+    }
+    Some(raw)
 }
 
 fn read_dir_paths(dir: &Path) -> Vec<PathBuf> {
@@ -198,5 +296,107 @@ mod tests {
         assert_eq!(v[0].models.iter().cloned().collect::<Vec<_>>(), vec!["claude-haiku-5-5", "claude-opus-5-5"]);
         assert_eq!(v[1].git_branch, None);
         assert_eq!(v[1].tool, Some(Tool::ClaudeCode));
+    }
+
+    fn s1_bytes() -> Vec<u8> {
+        std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/claude/projects/-tmp-demo/s1.jsonl")).unwrap()
+    }
+
+    fn temp_dir(test: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("aiwl-claude-{test}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn main_file(path: PathBuf) -> ClaudeFile {
+        ClaudeFile { path, session_id: "s1".into(), is_main: true }
+    }
+
+    fn append(path: &Path, bytes: &[u8]) {
+        use std::io::Write;
+        std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap().write_all(bytes).unwrap();
+    }
+
+    fn sorted(mut raw: RawSession) -> RawSession {
+        raw.activity.sort();
+        raw.token_events.sort_by_key(|e| e.at);
+        raw
+    }
+
+    #[test]
+    fn incremental_equals_full_read_at_every_split() {
+        let bytes = s1_bytes();
+        let dir = temp_dir("split");
+        let path = dir.join("s1.jsonl");
+        let file = main_file(path.clone());
+
+        std::fs::write(&path, &bytes).unwrap();
+        let mut full = ClaudeFileState::default();
+        read_claude_file(&file, 0, &mut full).unwrap();
+        let expected = sorted(merge_claude(Some(&full), &[]).unwrap());
+
+        for k in 0..=bytes.len() {
+            std::fs::write(&path, &bytes[..k]).unwrap();
+            let mut st = ClaudeFileState::default();
+            let off = read_claude_file(&file, 0, &mut st).unwrap();
+            append(&path, &bytes[k..]);
+            read_claude_file(&file, off, &mut st).unwrap();
+            assert_eq!(sorted(merge_claude(Some(&st), &[]).unwrap()), expected, "split at {k}");
+            assert_eq!(st.user_texts, full.user_texts, "split at {k}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keeps_first_cwd_across_resumes() {
+        let dir = temp_dir("cwd");
+        let path = dir.join("s1.jsonl");
+        let file = main_file(path.clone());
+        let line = |ts: &str, cwd: &str| {
+            format!("{{\"type\":\"user\",\"timestamp\":\"{ts}\",\"cwd\":\"{cwd}\",\"message\":{{\"content\":\"x\"}}}}\n")
+        };
+        std::fs::write(&path, line("2026-11-20T01:00:00.000Z", "/first")).unwrap();
+        let mut st = ClaudeFileState::default();
+        let off = read_claude_file(&file, 0, &mut st).unwrap();
+        append(&path, line("2026-11-20T01:01:00.000Z", "/second").as_bytes());
+        read_claude_file(&file, off, &mut st).unwrap();
+        assert_eq!(st.raw.cwd.as_deref(), Some("/first"));
+        assert_eq!(st.raw.activity.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn collects_up_to_three_user_texts_from_main_only() {
+        let dir = temp_dir("texts");
+        let main = dir.join("s1.jsonl");
+        let sub = dir.join("agent-a.jsonl");
+        let user = |content: &str, extra: &str| {
+            format!("{{\"type\":\"user\",\"timestamp\":\"2026-11-20T01:00:00.000Z\"{extra},\"message\":{{\"content\":{content}}}}}\n")
+        };
+        let long = "あ".repeat(400);
+        let mut text = String::new();
+        text += &user("\"one\"", "");
+        text += &user(r#"[{"type":"tool_result","content":"secret"}]"#, "");
+        text += &user("\"meta\"", r#","isMeta":true"#);
+        text += &user("\"<command-name>/x</command-name>\"", "");
+        text += &user("\"<local-command-stdout>y</local-command-stdout>\"", "");
+        text += &user(r#"[{"type":"text","text":"two"},{"type":"text","text":"parts"}]"#, "");
+        text += &user(&format!("\"{long}\""), "");
+        text += &user("\"four\"", "");
+        std::fs::write(&main, &text).unwrap();
+        std::fs::write(&sub, user("\"from sub\"", "")).unwrap();
+
+        let mut m = ClaudeFileState::default();
+        read_claude_file(&main_file(main), 0, &mut m).unwrap();
+        assert_eq!(m.user_texts.len(), 3);
+        assert_eq!(m.user_texts[0], "one");
+        assert_eq!(m.user_texts[1], "two\nparts");
+        assert_eq!(m.user_texts[2].chars().count(), 300);
+
+        let mut s = ClaudeFileState::default();
+        read_claude_file(&ClaudeFile { path: sub, session_id: "s1".into(), is_main: false }, 0, &mut s).unwrap();
+        assert!(s.user_texts.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
