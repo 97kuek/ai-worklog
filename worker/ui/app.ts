@@ -49,6 +49,7 @@ function scheduleOfficeRefresh() {
   if (view === "office" && !document.hidden) officeTimer = window.setTimeout(() => void load(), 15000);
 }
 let refreshBoard: ReturnType<typeof renderBoard> | undefined;
+let pollingBoard: typeof refreshBoard;
 let boardTimer: number | undefined;
 function scheduleBoardRefresh() {
   window.clearTimeout(boardTimer);
@@ -58,22 +59,24 @@ function scheduleBoardRefresh() {
 async function pollBoard() {
   const refresh = refreshBoard;
   const signal = request?.signal;
-  if (!refresh || document.hidden) return;
+  if (!refresh || pollingBoard === refresh || document.hidden) return;
+  pollingBoard = refresh;
   try {
     await refresh(async () => {
       const data = await api<{ requests: BoardRequest[] }>("/api/board/requests", { signal });
+      if (refreshBoard === refresh && notice.dataset.boardOffline) {
+        notice.textContent = "";
+        delete notice.dataset.boardOffline;
+      }
       return data.requests;
     });
-    if (refreshBoard === refresh && notice.dataset.boardOffline) {
-      notice.textContent = "";
-      delete notice.dataset.boardOffline;
-    }
   } catch (e) {
     if (refreshBoard === refresh && !signal?.aborted) {
       notice.dataset.boardOffline = "true";
       notice.textContent = "Board updates paused. " + message(e);
     }
   } finally {
+    if (pollingBoard === refresh) pollingBoard = undefined;
     if (refreshBoard === refresh && !signal?.aborted) scheduleBoardRefresh();
   }
 }
