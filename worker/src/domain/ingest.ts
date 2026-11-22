@@ -1,5 +1,7 @@
 export type TokenCounts = { input: number; output: number; cache_read: number; cache_write: number };
 export type IngestBlock = { seq: number; started_at: number; ended_at: number; message_count: number; tokens: TokenCounts };
+export type ObservedStatus = { state: "running" | "waiting" | "unknown"; at: number };
+export type ModelEffort = { model: string; effort: string | null };
 export type IngestSession = {
   tool: string;
   native_session_id: string;
@@ -8,7 +10,9 @@ export type IngestSession = {
   cwd: string | null;
   git_branch: string | null;
   models: string[];
+  model_efforts?: ModelEffort[];
   invoked_by: string | null;
+  observed_status?: ObservedStatus;
   started_at: number;
   ended_at: number;
   active_minutes: number;
@@ -86,6 +90,15 @@ function timeRange(o: Record<string, unknown>, path: string): { started_at: numb
   return { started_at, ended_at };
 }
 
+function observedStatus(v: unknown, path: string): ObservedStatus {
+  if (!isObject(v)) return fail(path, "must be an object");
+  const state = v.state;
+  if (state !== "running" && state !== "waiting" && state !== "unknown") {
+    return fail(`${path}.state`, "must be running, waiting or unknown");
+  }
+  return { state, at: timestamp(v.at, `${path}.at`) };
+}
+
 function block(v: unknown, path: string, index: number): IngestBlock {
   if (!isObject(v)) return fail(path, "must be an object");
   const seq = count(v.seq, `${path}.seq`, 0);
@@ -97,6 +110,18 @@ function block(v: unknown, path: string, index: number): IngestBlock {
     message_count: count(v.message_count, `${path}.message_count`, 1),
     tokens: tokens(v.tokens, `${path}.tokens`),
   };
+}
+
+function modelEfforts(v: unknown, path: string): ModelEffort[] {
+  if (!Array.isArray(v)) return fail(path, "must be an array");
+  return v.map((pair, i) => {
+    const item = `${path}[${i}]`;
+    if (!isObject(pair)) return fail(item, "must be an object");
+    return {
+      model: str(pair.model, `${item}.model`, 1, 100),
+      effort: pair.effort === null ? null : str(pair.effort, `${item}.effort`, 1, 100),
+    };
+  });
 }
 
 function session(v: unknown, path: string): IngestSession {
@@ -133,7 +158,9 @@ function session(v: unknown, path: string): IngestSession {
     cwd,
     git_branch,
     models,
+    ...(v.model_efforts === undefined ? {} : { model_efforts: modelEfforts(v.model_efforts, `${path}.model_efforts`) }),
     invoked_by,
+    ...(v.observed_status === undefined ? {} : { observed_status: observedStatus(v.observed_status, `${path}.observed_status`) }),
     ...range,
     active_minutes: am,
     tokens: sessionTokens,

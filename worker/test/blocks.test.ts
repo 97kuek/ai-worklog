@@ -46,8 +46,7 @@ it("returns_blocks_in_range_with_their_sessions", async () => {
   const res = await get(DAY);
   expect(res.status).toBe(200);
   expect(res.headers.get("Cache-Control")).toBe("private, no-cache");
-  expect(res.headers.get("ETag")).toBe(`"v1-${NOW}"`);
-  expect(res.headers.get("ETag")!.startsWith(`"v1-`)).toBe(true);
+  expect(res.headers.get("ETag")).toMatch(/^".+"$/);
   const body = (await res.json()) as Body;
   expect(body.version).toBe(NOW);
   expect(body.blocks.map((b) => b.started_at)).toEqual([
@@ -62,11 +61,15 @@ it("returns_blocks_in_range_with_their_sessions", async () => {
     id: body.blocks[0]!.session_id,
     tool: "claude_code",
     title: "見本の作業",
+    manual_title: null,
     project: "demo",
     git_branch: "main",
     models: ["claude-opus-5-5"],
+    model_efforts: [{ model: "claude-opus-5-5", effort: null }],
     invoked_by: null,
     machine_name: "example-mac",
+    completed_at: null,
+    observed_status: { state: "waiting", at: "2026-11-20T02:10:00.000Z" },
     started_at: "2026-11-20T01:00:00.000Z",
     ended_at: "2026-11-20T02:10:00.000Z",
     active_minutes: 30,
@@ -88,6 +91,17 @@ it("includes_blocks_that_started_before_the_range", async () => {
   expect(body.blocks.map((b) => b.seq)).toEqual([0]);
   expect(body.blocks[0]!.started_at).toBe("2026-11-20T01:00:00.000Z");
   expect(body.sessions).toHaveLength(1);
+});
+
+it("includes a long block that started more than two days before the report exactly once", async () => {
+  const data = structuredClone(example);
+  const session = data.sessions[0]!;
+  session.started_at = "2026-11-16T00:00:00Z";
+  session.blocks[0]!.started_at = session.started_at;
+  await seed(data);
+  const result = (await (await get(DAY)).json()) as Body;
+  const id = result.sessions.find(s => s.tool === "claude_code")!.id;
+  expect(result.blocks.filter(b => b.session_id === id).map(b => b.seq)).toEqual([0, 1]);
 });
 
 it("excludes_blocks_ending_before_the_range", async () => {
@@ -115,8 +129,36 @@ it("changes_etag_after_new_data", async () => {
   await seed(changed, NOW + 1000);
   const res = await get(DAY, { "If-None-Match": etag });
   expect(res.status).toBe(200);
-  expect(res.headers.get("ETag")).toBe(`"v1-${NOW + 1000}"`);
   expect(res.headers.get("ETag")).not.toBe(etag);
+});
+
+it("keeps the latest observation through retries, out-of-order uploads and legacy clients", async () => {
+  const { observed_status, ...legacy } = example.sessions[0]!;
+  const upload = (session: object, now: number) => seed({ ...example, sessions: [session] }, now);
+  const read = async () => ((await (await get(DAY)).json()) as Body).sessions[0];
+  const at = "2026-11-20T02:11:00.000Z";
+  const running = { ...legacy, observed_status: { state: "running", at } };
+  const waiting = { ...legacy, observed_status: { state: "waiting", at: "2026-11-20T11:12:00+09:00" } };
+  await upload(legacy, NOW);
+  expect(await read()).not.toHaveProperty("observed_status");
+  await upload(running, NOW + 1);
+  expect(await read()).toHaveProperty("observed_status", { state: "running", at });
+  const tag = (await get(DAY)).headers.get("ETag")!;
+  await upload(waiting, NOW + 2);
+  const newer = await get(DAY, { "If-None-Match": tag });
+  expect(newer.status).toBe(200);
+  const latest = { state: "waiting", at: "2026-11-20T02:12:00.000Z" };
+  expect(((await newer.json()) as Body).sessions[0]).toHaveProperty("observed_status", latest);
+  const freshTag = newer.headers.get("ETag")!;
+  await upload(waiting, NOW + 3);
+  await upload(running, NOW + 4);
+  await upload({ ...waiting, observed_status: { ...waiting.observed_status, state: "unknown" } }, NOW + 5);
+  expect((await get(DAY, { "If-None-Match": freshTag })).status).toBe(304);
+  await upload({ ...legacy, title: "legacy metadata update" }, NOW + 6);
+  expect(await read()).toMatchObject({ title: "legacy metadata update", observed_status: latest });
+  const unknown = { state: "unknown", at: "2026-11-20T02:13:00.000Z" };
+  await upload({ ...legacy, observed_status: unknown }, NOW + 7);
+  expect(await read()).toHaveProperty("observed_status", unknown);
 });
 
 it("never_returns_other_users_data", async () => {

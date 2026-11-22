@@ -3,6 +3,7 @@ import { ConfigError, type Authenticate } from "./auth/identity";
 import { ensureMachine, ensureUser } from "./db/repo";
 import { registerBlockRoutes } from "./routes/blocks";
 import { registerSessionRoutes } from "./routes/sessions";
+import { registerSkillRoutes } from "./routes/skills";
 
 export type Principal =
   | { kind: "user"; userId: string }
@@ -31,6 +32,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
       // A service token that passed the Access policy is the owner's machine.
       const userId = await ensureUser(c.env.DB, ownerEmail, now());
       const machineId = await ensureMachine(c.env.DB, userId, identity.clientId, now());
+      if (machineId === null) return c.json({ error: "forbidden" }, 403);
       c.set("principal", { kind: "machine", userId, machineId });
     }
     await next();
@@ -43,6 +45,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
 
   registerSessionRoutes(app, now);
   registerBlockRoutes(app);
+  registerSkillRoutes(app);
 
   app.onError((err, c) => {
     if (err instanceof ConfigError) {
