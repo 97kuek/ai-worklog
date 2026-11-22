@@ -40,8 +40,11 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   });
 
   app.onError((err, c) => {
-    if (err instanceof ConfigError) return c.json({ error: "misconfigured" }, 500);
-    console.error("unexpected error:", err instanceof Error ? err.name : "unknown");
+    if (err instanceof ConfigError) {
+      console.error("misconfigured:", err.message);
+      return c.json({ error: "misconfigured" }, 500);
+    }
+    console.error("unexpected error", err);
     return c.json({ error: "internal" }, 500);
   });
 
