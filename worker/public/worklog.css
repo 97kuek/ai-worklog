@@ -797,13 +797,7 @@ main:focus {
 @media (hover: hover) { .filter-option:hover { background-color: var(--paper); } }
 
 @media (max-width: 600px) {
-  .mast { position: static; }
-  .mast-inner { display: grid; grid-template-columns: 1fr auto; gap: 4px 8px; padding-block: 6px; }
-  #nav-toggle { display: none; }
-  #refresh { grid-area: 1 / 2; }
-  #main-nav { display: grid; grid-column: 1 / -1; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 4px; }
-  #main-nav a { display: grid; place-items: center; min-height: 44px; padding: 0 4px; border-radius: 6px; }
-  #main-nav a[aria-current] { color: var(--accent); background: var(--paper); font-weight: 700; }
+  .mast-inner { min-height: 54px; }
   .page-head { margin-block: 20px 16px; }
   .week-controls { width: 100%; }
   .strip-day { gap: 2px; padding-block: 6px; }
