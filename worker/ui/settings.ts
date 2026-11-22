@@ -77,7 +77,7 @@ function machinePanel(machine: Machine, actions: Actions, signal: AbortSignal) {
         }
       }, 3000);
     } else {
-      testResult.textContent = "No reply yet. A busy runner checks in after its current task. If idle, check that the Mac is awake.";
+      testResult.textContent = "No reply yet. Check that the Mac is awake and its runner is active.";
     }
   };
   if (machine.connection_test) track(machine.connection_test);
@@ -140,8 +140,9 @@ export function renderSettings(root: HTMLElement, settings: RunnerSettings, acti
   guide.append(el("p", "", "On your Mac, run this command in Terminal and choose the folder to use."));
   guide.append(el("code", "", "~/.cargo/bin/taskfolio folder add"));
   guide.append(el("p", "", "After the next check-in, refresh Settings to see the folder. Its switch pauses or resumes queued work."));
-  const docs = el("a", "", "Mac setup guide");
-  docs.href = "https://github.com/97kuek/taskfolio#run-a-queued-request-on-your-mac";
+  const docs = el("a", "", "Mac のセットアップ手順");
+  docs.lang = "ja";
+  docs.href = "#help/mac";
   guide.append(docs);
   layout.append(guide);
   root.replaceChildren(layout);
