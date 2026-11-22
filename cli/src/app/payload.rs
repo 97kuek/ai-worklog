@@ -2,8 +2,9 @@ use std::ops::Range;
 
 use serde::Serialize;
 
+use super::output::StatusOut;
 use crate::adapters::time::format_ts;
-use crate::domain::{fnv1a64, Session, TokenUsage, Tool};
+use crate::domain::{fnv1a64, ModelEffort, Session, TokenUsage, Tool};
 
 pub struct Outgoing<'a> {
     pub session: &'a Session,
@@ -19,7 +20,11 @@ struct SessionOut<'a> {
     cwd: Option<&'a str>,
     git_branch: Option<&'a str>,
     models: &'a [String],
+    #[serde(skip_serializing_if = "<[ModelEffort]>::is_empty")]
+    model_efforts: &'a [ModelEffort],
     invoked_by: Option<Tool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    observed_status: Option<StatusOut>,
     started_at: String,
     ended_at: String,
     active_minutes: f64,
@@ -52,7 +57,9 @@ fn session_out<'a>(item: &Outgoing<'a>) -> SessionOut<'a> {
         cwd: s.cwd.as_deref(),
         git_branch: s.git_branch.as_deref(),
         models: &s.models,
+        model_efforts: &s.model_efforts,
         invoked_by: s.invoked_by,
+        observed_status: s.observed_status.map(Into::into),
         started_at: format_ts(s.started_at),
         ended_at: format_ts(s.ended_at),
         active_minutes: (s.active_minutes * 100.0).round() / 100.0,
@@ -116,7 +123,7 @@ pub fn chunk(block_counts: &[usize], limits: &ChunkLimits) -> Vec<Range<usize>> 
 mod tests {
     use super::*;
     use crate::adapters::time::parse_ts;
-    use crate::domain::Block;
+    use crate::domain::{Block, ObservedState, StatusObservation};
 
     fn ts(s: &str) -> i64 {
         parse_ts(s).unwrap()
@@ -135,7 +142,9 @@ mod tests {
             cwd: Some("/tmp/demo".into()),
             git_branch: Some("main".into()),
             models: vec!["claude-opus-5-5".into()],
+            model_efforts: vec![ModelEffort { model: "claude-opus-5-5".into(), effort: None }],
             invoked_by: None,
+            observed_status: Some(StatusObservation { state: ObservedState::Waiting, at: ts("2026-11-20T02:10:00Z") }),
             started_at: ts("2026-11-20T01:00:00.000Z"),
             ended_at: ts("2026-11-20T02:10:00.000Z"),
             active_minutes: 30.0,
@@ -169,7 +178,9 @@ mod tests {
             cwd: Some("/tmp/demo".into()),
             git_branch: None,
             models: vec!["gpt-5.5".into()],
+            model_efforts: vec![ModelEffort { model: "gpt-5.5".into(), effort: Some("high".into()) }],
             invoked_by: Some(Tool::ClaudeCode),
+            observed_status: None,
             started_at: t,
             ended_at: t,
             active_minutes: 0.0,
@@ -205,6 +216,13 @@ mod tests {
         let s = claude();
         let base = session_fingerprint(&Outgoing { session: &s, title: Some("a") });
         assert_eq!(base, session_fingerprint(&Outgoing { session: &claude(), title: Some("a") }));
+
+        let mut status = claude();
+        status.observed_status.as_mut().unwrap().state = ObservedState::Running;
+        assert_ne!(base, session_fingerprint(&Outgoing { session: &status, title: Some("a") }));
+        status.observed_status = s.observed_status;
+        status.observed_status.as_mut().unwrap().at += 1;
+        assert_ne!(base, session_fingerprint(&Outgoing { session: &status, title: Some("a") }));
 
         let mut ended = claude();
         ended.blocks[1].ended_at += 1000;

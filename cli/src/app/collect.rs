@@ -11,12 +11,13 @@ use super::payload::{chunk, session_fingerprint, to_ingest_json, ChunkLimits, Ou
 use super::ledger::{self, Ledger};
 use super::state::{self, FileEntry, State};
 use crate::adapters::claude::{list_claude_files, merge_claude, read_claude_file, ClaudeFile, ClaudeFileState};
-use crate::adapters::codex::{list_codex_files, merge_codex, read_codex_file, read_thread_titles, CodexFileState, CodexRole};
+use crate::adapters::codex::{list_codex_files, merge_codex, read_codex_file, read_thread_titles, CodexFileState, CodexRole, ReviewContext};
 use crate::adapters::fsutil::create_private_dir;
 use crate::adapters::http::{SendError, Sender};
 use crate::adapters::jsonl::{stat, FileId};
 use crate::adapters::namer::{build_material, NameOutcome, Namer};
-use crate::domain::{build_session, Millis, Session};
+use crate::domain::{build_session, Millis, ObservedState, Session, StatusObservation, Tool};
+use crate::adapters::{claude_live, status_hook};
 
 /// 使えない出力がこれだけ続いたら、それ以降は試さない
 const MAX_NAME_ATTEMPTS: u8 = 2;
@@ -24,6 +25,7 @@ const MAX_NAME_ATTEMPTS: u8 = 2;
 const MAX_ERROR_FIELD_CHARS: usize = 200;
 
 pub struct CollectOptions<'a> {
+    pub rescan: bool,
     pub claude_projects_dir: PathBuf,
     pub codex_dir: PathBuf,
     pub machine_name: String,
@@ -40,6 +42,7 @@ pub struct CollectReport {
     pub sessions_changed: usize,
     pub sessions_sent: usize,
     pub chunks_failed: usize,
+    pub skill_inventories_sent: usize,
     pub names_assigned: usize,
     pub auth_failed: bool,
     pub errors: Vec<String>,
@@ -50,13 +53,43 @@ pub struct CollectReport {
 /// state（ファイルごとの途中結果）と ledger（名前と送った記録）は呼び出し側が load して渡し、
 /// 終わったら save する
 pub fn collect(opts: &CollectOptions, state: &mut State, ledger: &mut Ledger, sender: &dyn Sender) -> CollectReport {
+    collect_from_home(opts, state, ledger, sender, None)
+}
+
+fn collect_from_home(opts: &CollectOptions, state: &mut State, ledger: &mut Ledger, sender: &dyn Sender, home: Option<&Path>) -> CollectReport {
     let mut report = CollectReport::default();
     report.errors.extend(state.load_error.take());
     report.errors.extend(ledger.load_error.take());
     let gap_ms = opts.gap_minutes.saturating_mul(60_000);
 
     read_new_lines(opts, state, &mut report);
-    let built = build_sessions(opts, state, gap_ms);
+    let mut built = build_sessions(opts, state, gap_ms);
+    if let Some(home) = home {
+        let registry = opts.claude_projects_dir.parent().map(|dir| dir.join("sessions"));
+        let live = registry.as_deref().map(claude_live::read_statuses).transpose()
+            .unwrap_or_else(|e| { report.errors.push(format!("cannot read Claude session registry: {e}")); None })
+            .unwrap_or_default();
+        for b in &mut built {
+            let s = &mut b.session;
+            let mut latest = ledger.sessions.get(&b.key).and_then(|e| e.external_status);
+            if s.tool == Tool::ClaudeCode && let Some(status) = live.get(&s.native_session_id) {
+                status.merge_into(&mut latest);
+            }
+            match status_hook::read_latest(home, s.tool, &s.native_session_id) {
+                Ok(Some(status)) => status.merge_into(&mut latest),
+                Ok(None) => {}
+                Err(e) => report.errors.push(format!("cannot read hook status for {}: {e}", b.key)),
+            }
+            if let Some(status) = latest {
+                ledger.sessions.entry(b.key.clone()).or_default().external_status = Some(status);
+                status.merge_into(&mut s.observed_status);
+            }
+            if s.tool == Tool::Codex {
+                let entry = ledger.sessions.entry(b.key.clone()).or_default();
+                apply_permission_wait(home, s, b.review.as_ref(), entry, opts.now, &mut report);
+            }
+        }
+    }
     if let Some((namer, min_user_messages, max_per_run)) = opts.naming {
         let rule = NamingRule { min_user_messages, max_per_run, now: opts.now, gap_ms };
         name_sessions(namer, &rule, ledger, &built, &mut report);
@@ -66,8 +99,53 @@ pub fn collect(opts: &CollectOptions, state: &mut State, ledger: &mut Ledger, se
     report
 }
 
+fn apply_permission_wait(
+    home: &Path, session: &mut Session, review: Option<&ReviewContext>,
+    entry: &mut ledger::SessionEntry, now: Millis, report: &mut CollectReport,
+) {
+    let Some(review) = review else {
+        entry.permission_wait = None;
+        return;
+    };
+    let confirmed = session.observed_status;
+    let mut candidate = None;
+    if let Some((turn, at)) = &entry.permission_wait
+        && turn == &review.turn_id && confirmed.is_none_or(|s| s.at <= *at)
+    {
+        if review.human_since.is_some_and(|since| since <= *at) {
+            candidate = Some(*at);
+        } else {
+            // The reviewer changed after a permission wait. We observed the policy
+            // change, but have no evidence that the model or tool has resumed.
+            // When timestamps tie, receipt of the changed context orders the events.
+            let cleared_at = if review.at > *at { review.at } else { now };
+            if cleared_at > *at {
+                let clear = StatusObservation { state: ObservedState::Unknown, at: cleared_at };
+                clear.merge_into(&mut entry.external_status);
+                clear.merge_into(&mut session.observed_status);
+            } else {
+                return; // retry after the clock has advanced
+            }
+        }
+    }
+    if let Some(since) = review.human_since {
+        match status_hook::read_for_turn(home, session.tool, &session.native_session_id, Some(&review.turn_id)) {
+            Ok(Some(status)) if status.state == ObservedState::Waiting && status.at >= since
+                && confirmed != Some(status) && session.observed_status.is_none_or(|s| status.at >= s.at) => {
+                candidate = Some(candidate.map_or(status.at, |old| old.max(status.at)));
+            }
+            Ok(_) => {}
+            Err(e) => report.errors.push(format!("cannot read approval status for {}: {e}", session.native_session_id)),
+        }
+    }
+    entry.permission_wait = candidate.map(|at| {
+        StatusObservation { state: ObservedState::Waiting, at }.merge_into(&mut session.observed_status);
+        (review.turn_id.clone(), at)
+    });
+}
+
 pub struct SaveOptions<'a> {
-    /// state.json と sent.json を置くフォルダ（~/.ai-worklog）
+    /// state.json と sent.json を置くフォルダ（~/.taskfolio）
     pub home: &'a Path,
     /// config の token_expires_on（YYYY-MM-DD）
     pub token_expires_on: Option<&'a str>,
@@ -82,18 +160,25 @@ pub fn collect_and_save(opts: &CollectOptions, save: &SaveOptions, sender: &dyn 
     let ledger_path = save.home.join("sent.json");
     let mut st = state::load(&state_path);
     let mut led = ledger::load(&ledger_path);
+    // A forced rebuild must preserve the last good upload and offline aggregates.
+    if opts.rescan && (st.load_error.is_some() || led.load_error.is_some()) {
+        return CollectReport {
+            errors: vec!["cannot rescan: repair the unreadable state or ledger first".into()],
+            ..CollectReport::default()
+        };
+    }
     let state_reset = st.load_error.is_some();
     let load_failed = state_reset || led.load_error.is_some();
     // 読み込みエラーで空になったときは初めての回とみなさない（大量に読んだ警告を出す）
     let first_run = !state_reset && st.files.is_empty() && led.sessions.is_empty();
     let sessions_before = led.sessions.clone();
 
-    let mut report = collect(opts, &mut st, &mut led, sender);
+    let mut report = collect_from_home(opts, &mut st, &mut led, sender, Some(save.home));
 
     if state_reset {
         report.errors.push("warning: file state was reset after a load error; all logs were read again".into());
     }
-    if report.bytes_read > save.big_read_warn_bytes && !first_run {
+    if !opts.rescan && report.bytes_read > save.big_read_warn_bytes && !first_run {
         report.errors.push(format!("warning: read {} bytes in one run; state may have been reset", report.bytes_read));
     }
     // 期限の記録がなければ (true, _)。過ぎているか30日以内なら警告する
@@ -113,7 +198,7 @@ pub fn collect_and_save(opts: &CollectOptions, save: &SaveOptions, sender: &dyn 
     report
 }
 
-/// ~/.ai-worklog/collect.lock を try_lock する。取れなければ None
+/// ~/.taskfolio/collect.lock を try_lock する。取れなければ None
 pub fn acquire_lock(home: &Path) -> io::Result<Option<File>> {
     create_private_dir(home)?;
     let file = OpenOptions::new().create(true).truncate(false).write(true).mode(0o600).open(home.join("collect.lock"))?;
@@ -144,6 +229,8 @@ impl FileEntry {
 
     fn reset(&mut self, source: &Source) {
         self.offset = 0;
+        self.status_scanned = true;
+        self.efforts_scanned = true;
         self.claude = None;
         self.codex = None;
         match source {
@@ -209,18 +296,43 @@ fn read_new_lines(opts: &CollectOptions, state: &mut State, report: &mut Collect
             }
         };
         let key = file_key(st.id);
-        // 同じパスが別の FileId になった：置き換えられたので古い途中結果を捨てる
-        if let Some(old) = previous.get(&path).filter(|old| **old != key)
-            && state.files.get(old).is_some_and(|e| e.path == path)
-        {
-            state.files.remove(old);
-        }
+        // Keep the old path's aggregate until its replacement has been read.
+        let replaced = previous.get(&path).filter(|old| **old != key
+            && state.files.get(*old).is_some_and(|e| e.path == path));
         present.insert(key.clone());
-        let entry = state.files.entry(key).or_default();
+        let entry = state.files.entry(key.clone()).or_default();
         // 同じ FileId で別のパス：rename（Codex のアーカイブなど）。続きから読む
         entry.path = path;
-        if !entry.is_from(&source) || st.len < entry.offset {
-            entry.reset(&source);
+        // Backfill status for main logs and model efforts for main and child logs.
+        // Keep old aggregates until the replacement has been read successfully.
+        let legacy_main = !entry.status_scanned && match &source {
+            Source::Claude { is_main, .. } => *is_main,
+            Source::Codex => matches!(entry.codex.as_ref().and_then(|st| st.role.as_ref()), Some(CodexRole::Main) | None),
+        };
+        let legacy_efforts = !entry.efforts_scanned
+            && !matches!(entry.codex.as_ref().and_then(|st| st.role.as_ref()), Some(CodexRole::Excluded));
+        if opts.rescan || replaced.is_some() || !entry.is_from(&source) || st.len < entry.offset || legacy_main || legacy_efforts {
+            let mut next = FileEntry { path: entry.path.clone(), ..FileEntry::default() };
+            next.reset(&source);
+            match next.read_more(&source) {
+                Ok(end) => {
+                    if end > 0 {
+                        report.files_read += 1;
+                        report.bytes_read += end;
+                    }
+                    next.offset = end;
+                    *entry = next;
+                    if let Some(old) = replaced { state.files.remove(old); }
+                }
+                Err(e) => {
+                    report.errors.push(format!("cannot read {}: {e}", entry.path.display()));
+                    if let Some(old) = replaced {
+                        present.insert(old.clone());
+                        if entry.claude.is_none() && entry.codex.is_none() { state.files.remove(&key); }
+                    }
+                }
+            }
+            continue;
         }
         if st.len == entry.offset {
             continue;
@@ -237,6 +349,9 @@ fn read_new_lines(opts: &CollectOptions, state: &mut State, report: &mut Collect
             Err(e) => report.errors.push(format!("cannot read {}: {e}", entry.path.display())),
         }
     }
+    // Only on a forced rescan, keep even completely unavailable sessions.
+    // They may be the only remaining local record after a log has been removed.
+    if opts.rescan { return; }
     // 消えたファイルの途中結果は、同じセッション（Codex は同じ親子の系統）の
     // ファイルが1つでも残っている間は、読まずに残してまとめに使う。
     // 捨てると小さくなったセッションを送り、クラウドの正しい記録を上書きしてしまう
@@ -280,6 +395,7 @@ fn file_groups(files: &BTreeMap<String, FileEntry>) -> HashMap<String, String> {
 
 struct Built {
     key: String,
+    review: Option<ReviewContext>,
     session: Session,
     /// 名付けの材料。送らない
     user_texts: Vec<String>,
@@ -304,7 +420,7 @@ fn build_sessions(opts: &CollectOptions, state: &State, gap_ms: i64) -> Vec<Buil
     for (id, (main, subs)) in claude {
         let Some((_, main)) = main else { continue };
         let Some(session) = merge_claude(Some(main), &subs).and_then(|raw| build_session(raw, gap_ms)) else { continue };
-        out.push(Built { key: format!("claude_code:{id}"), session, user_texts: main.user_texts.clone() });
+        out.push(Built { key: format!("claude_code:{id}"), review: None, session, user_texts: main.user_texts.clone() });
     }
 
     // Codex：同じ thread_id のファイルが2つあれば（move でなく copy）、読み進んだ方だけ使う
@@ -318,10 +434,12 @@ fn build_sessions(opts: &CollectOptions, state: &State, gap_ms: i64) -> Vec<Buil
     }
     let files: Vec<&CodexFileState> = threads.values().map(|(_, st)| *st).collect();
     for raw in merge_codex(&files, &read_thread_titles(&opts.codex_dir)) {
-        let user_texts = threads.get(raw.native_session_id.as_str()).map(|(_, st)| st.user_texts.clone()).unwrap_or_default();
+        let Some((_, main)) = threads.get(raw.native_session_id.as_str()) else { continue };
+        let review = main.active_review().cloned();
+        let user_texts = main.user_texts.clone();
         let key = format!("codex:{}", raw.native_session_id);
         let Some(session) = build_session(raw, gap_ms) else { continue };
-        out.push(Built { key, session, user_texts });
+        out.push(Built { key, review, session, user_texts });
     }
 
     out.sort_by(|a, b| a.session.started_at.cmp(&b.session.started_at).then_with(|| a.key.cmp(&b.key)));
@@ -543,6 +661,7 @@ mod tests {
         }
         fn opts<'a>(&self, now: Millis, naming: Option<(&'a dyn Namer, usize, usize)>, chunk: ChunkLimits) -> CollectOptions<'a> {
             CollectOptions {
+                rescan: false,
                 claude_projects_dir: self.claude(),
                 codex_dir: self.codex(),
                 machine_name: MACHINE.into(),
@@ -1294,6 +1413,191 @@ mod tests {
     }
 
     #[test]
+    fn model_efforts_follow_turns_and_children_across_upgrade_and_retry() {
+        use serde_json::json;
+        let env = Env::new("model-efforts");
+        let home = env.root.join("home");
+        let save = save_opts(&home);
+        let sender = FakeSender::ok();
+        let root = env.codex().join("sessions/2026/11/20");
+        let context = |name: &str, payload: Value| {
+            let line = json!({"type":"turn_context","payload":payload});
+            append(&root.join(name), &format!("{line}\n"));
+        };
+        context("rollout-a.jsonl", json!({"model":"gpt-5.5-codex","effort":"high"}));
+        context("rollout-b.jsonl", json!({"model":"sub","effort":"low"}));
+        context("rollout-b.jsonl", json!({"model":"sub","effort":{"unexpected":"ignore"}}));
+        let child = env.claude().join("-tmp-demo/s1/subagents/agent-a1.jsonl");
+        for fields in [json!({"effort":"high"}), json!({"perTurnEffort":"medium"}), json!({"effort":"arbitrary text"})] {
+            let mut line = json!({"type":"assistant","timestamp":"2026-11-20T01:40:00Z",
+                "message":{"model":"claude-haiku-5-5"}});
+            line.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+            append(&child, &format!("{line}\n"));
+        }
+
+        collect_and_save(&env.plain(), &save, &sender);
+        let first = sender.sessions(0);
+        let codex = session(&first, "c1");
+        assert_eq!(codex["model_efforts"], json!([
+            {"model":"gpt-5.5-codex","effort":null}, {"model":"gpt-5.5-codex","effort":"high"},
+            {"model":"sub","effort":null}, {"model":"sub","effort":"low"}
+        ]));
+        assert_eq!(session(&first, "s1")["model_efforts"], json!([
+            {"model":"claude-haiku-5-5","effort":null}, {"model":"claude-haiku-5-5","effort":"high"},
+            {"model":"claude-haiku-5-5","effort":"medium"}, {"model":"claude-opus-5-5","effort":null}
+        ]));
+
+        let path = home.join("state.json");
+        let mut old: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        for entry in old["files"].as_object_mut().unwrap().values_mut() {
+            entry.as_object_mut().unwrap().remove("efforts_scanned");
+            let raw = if entry["codex"].is_object() { &mut entry["codex"]["raw"] } else { &mut entry["claude"][2]["raw"] };
+            raw.as_object_mut().unwrap().remove("model_efforts");
+        }
+        std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+        // Old cached main and child records must be reconstructed even after a restart.
+        let repaired = collect_and_save(&env.plain(), &save, &sender);
+        assert!(repaired.bytes_read > 0);
+        assert_eq!(repaired.sessions_changed, 0);
+
+        context("rollout-b.jsonl", json!({"model":"sub","effort":"medium"}));
+        let fail = FakeSender::with(vec![Err(SendError::Server(500))]);
+        let update = collect_and_save(&env.plain(), &save, &fail);
+        assert_eq!((update.files_read, update.sessions_changed, update.sessions_sent), (1, 1, 0));
+        let calls = sender.calls();
+        let retry = collect_and_save(&env.plain(), &save, &sender);
+        assert_eq!((retry.bytes_read, retry.sessions_sent), (0, 1));
+        let after = sender.sessions(calls);
+        assert_eq!(after, fail.sessions(0));
+        assert_eq!(after[0]["blocks"], codex["blocks"]);
+        assert_eq!(after[0]["model_efforts"][4], json!({"model":"sub","effort":"medium"}));
+        assert_eq!(collect_and_save(&env.plain(), &save, &sender), CollectReport::default());
+    }
+
+    #[test]
+    fn old_file_cache_backfills_status_once_without_losing_a_vanished_child() {
+        let env = Env::new("status-backfill");
+        let home = env.root.join("home");
+        let save = save_opts(&home);
+        let sender = FakeSender::ok();
+        collect_and_save(&env.plain(), &save, &sender);
+        let original = sender.sessions(0);
+        let original = session(&original, "s1");
+        let path = home.join("state.json");
+        let mut legacy: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        for entry in legacy["files"].as_object_mut().unwrap().values_mut() {
+            entry.as_object_mut().unwrap().remove("status_scanned");
+            if let Some(claude) = entry["claude"].as_array_mut() {
+                claude[2]["raw"].as_object_mut().unwrap().remove("observed_status");
+            }
+        }
+        std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        std::fs::remove_file(env.claude().join("-tmp-demo/s1/subagents/agent-a1.jsonl")).unwrap();
+        // Simulate a previously-sent pre-observation fingerprint.
+        let ledger_path = home.join("sent.json");
+        let mut ledger = ledger::load(&ledger_path);
+        ledger.sessions.get_mut("claude_code:s1").unwrap().sent_fingerprint = Some(0);
+        ledger::save(&ledger_path, &ledger).unwrap();
+
+        let calls = sender.calls();
+        let report = collect_and_save(&env.plain(), &save, &sender);
+        assert!(report.bytes_read > 0);
+        assert_eq!(sender.ids(calls), ["s1"]);
+        let sessions = sender.sessions(calls);
+        assert_eq!(session(&sessions, "s1"), original);
+        assert!(original["observed_status"].is_object());
+        assert_eq!(collect_and_save(&env.plain(), &save, &sender), CollectReport::default());
+    }
+
+    #[test]
+    fn codex_permissions_require_the_current_turn_and_explicit_human_review() {
+        let env = Env::new("codex-review-turn");
+        let home = env.root.join("home");
+        let save = save_opts(&home);
+        let sender = FakeSender::ok();
+        let id = "review-test";
+        let hook = serde_json::json!({"hook_event_name":"PermissionRequest","session_id":id,"turn_id":"one"});
+        status_hook::record(&home, Tool::Codex, hook.to_string().as_bytes()).unwrap();
+        let pending = status_hook::read_for_turn(&home, Tool::Codex, id, Some("one")).unwrap().unwrap();
+        let path = env.codex().join("sessions/review.jsonl");
+        std::fs::write(&path, "").unwrap();
+        let add = |delta: i64, kind: &str, payload: Value| {
+            let at = crate::adapters::time::format_ts(pending.at + delta);
+            let line = serde_json::json!({"timestamp":at, "type":kind, "payload":payload});
+            append(&path, &format!("{line}\n"));
+        };
+        let status = || {
+            let calls = sender.calls();
+            let report = collect_and_save(&env.plain(), &save, &sender);
+            assert!(report.errors.is_empty(), "{:?}", report.errors);
+            sender.sessions(calls).into_iter().find(|s| s["native_session_id"] == id)
+                .map(|s| s["observed_status"]["state"].as_str().unwrap().to_owned())
+        };
+        let started = |turn: &str| serde_json::json!({"type":"task_started","turn_id":turn});
+        let reviewer = |turn: &str, who: &str| serde_json::json!({"turn_id":turn,"approvals_reviewer":who});
+        add(-20, "session_meta", serde_json::json!({"id":id,"source":"cli"}));
+        add(-19, "event_msg", started("one"));
+        assert_eq!(status().as_deref(), Some("running")); // no reviewer yet
+        add(-18, "turn_context", reviewer("one", "auto_review"));
+        assert_eq!(status(), None);
+        add(-17, "turn_context", reviewer("one", "user"));
+        assert_eq!(status().as_deref(), Some("waiting"));
+        add(-18, "turn_context", reviewer("one", "auto_review")); // late old context
+        assert_eq!(status(), None);
+        add(1, "turn_context", reviewer("one", "auto_review"));
+        assert_eq!(status().as_deref(), Some("unknown"));
+        let cleared = sender.sessions(sender.calls() - 1);
+        let cleared_at = session(&cleared, id)["observed_status"]["at"].as_str().unwrap();
+        assert_eq!(ts(cleared_at), pending.at + 1); // the Worker's monotonic upsert accepts the correction
+        add(2, "turn_context", reviewer("one", "user"));
+        assert_eq!(status(), None); // the same-turn request predates this human-review policy
+        add(3, "event_msg", started("two"));
+        add(4, "turn_context", reviewer("one", "user")); // delayed context for previous turn
+        add(5, "turn_context", reviewer("two", "user"));
+        // A delayed permission hook for turn one must not mark turn two waiting.
+        status_hook::record(&home, Tool::Codex, hook.to_string().as_bytes()).unwrap();
+        assert_eq!(status().as_deref(), Some("running"));
+        add(10, "event_msg", serde_json::json!({"type":"turn_aborted","turn_id":"two"}));
+        add(11, "turn_context", reviewer("two", "user"));
+        assert_eq!(status().as_deref(), Some("unknown"));
+        assert_eq!(status(), None);
+    }
+
+    #[test]
+    fn hook_only_change_retries_even_if_the_snapshot_disappears() {
+        let env = Env::new("status-hook-retry");
+        let home = env.root.join("home");
+        let save = save_opts(&home);
+        // Make the test independent of the host clock and exercise an exact timestamp tie.
+        let project = env.claude().join("-tmp-demo");
+        let path = project.join("hook-test.jsonl");
+        let input = br#"{"hook_event_name":"Stop","session_id":"hook-test","last_assistant_message":"done"}"#;
+        status_hook::record(&home, Tool::ClaudeCode, &input[..]).unwrap();
+        let status = status_hook::read_latest(&home, Tool::ClaudeCode, "hook-test").unwrap().unwrap();
+        let at = crate::adapters::time::format_ts(status.at);
+        let line = serde_json::json!({"type":"user","timestamp":at,"message":{"content":"begin"}});
+        std::fs::write(&path, format!("{line}\n")).unwrap();
+        std::fs::rename(home.join("status"), home.join("pending")).unwrap();
+        let sender = FakeSender::ok();
+        collect_and_save(&env.plain(), &save, &sender);
+        let before = sender.sessions(0);
+        assert_eq!(session(&before, "hook-test")["observed_status"]["state"], "running");
+
+        std::fs::rename(home.join("pending"), home.join("status")).unwrap();
+        let fail = FakeSender::with(vec![Err(SendError::Server(500))]);
+        let report = collect_and_save(&env.plain(), &save, &fail);
+        assert_eq!((report.bytes_read, report.sessions_changed, report.sessions_sent), (0, 1, 0));
+        std::fs::rename(home.join("status"), home.join("pending")).unwrap();
+        let calls = sender.calls();
+        let retry = collect_and_save(&env.plain(), &save, &sender);
+        assert_eq!((retry.bytes_read, retry.sessions_sent), (0, 1));
+        let after = sender.sessions(calls);
+        assert_eq!(after[0]["observed_status"], serde_json::json!({"state":"waiting","at":at}));
+        assert_eq!(after[0]["blocks"], session(&before, "hook-test")["blocks"]);
+        assert_eq!(collect_and_save(&env.plain(), &save, &sender), CollectReport::default());
+    }
+
+    #[test]
     fn saves_only_when_something_changed() {
         let env = Env::new("save_only_changed");
         let home = env.root.join("home");
@@ -1316,6 +1620,84 @@ mod tests {
         collect_and_save(&env.plain(), &save_opts(&home), &sender);
         assert_ne!(mtime(&state_path), state_at);
         assert_ne!(mtime(&ledger_path), ledger_at);
+    }
+
+    #[test]
+    fn forced_rescan_rebuilds_available_logs_and_preserves_offline_data_and_names() {
+        let env = Env::new("forced_rescan");
+        let home = env.root.join("home");
+        let save = SaveOptions { big_read_warn_bytes: 1, ..save_opts(&home) };
+        let namer = FakeNamer::new(Some("Saved title"));
+        let mut opts = env.opts(ts("2026-11-22T00:00:00.000Z"), Some((&namer, 1, 10)), DEFAULT_CHUNK);
+        let sender = FakeSender::ok();
+        let first = collect_and_save(&opts, &save, &sender);
+        let before = ledger::load(&home.join("sent.json")).sessions;
+        let state_path = home.join("state.json");
+        let expected = state::load(&state_path);
+        // Rebuild the cache even when the stored offset and current file size agree.
+        let mut stale = state::load(&state_path);
+        for file in stale.files.values_mut().filter(|file| file.path == env.s1()) {
+            file.claude.as_mut().unwrap().2.raw.models.clear();
+        }
+        state::save(&state_path, &stale).unwrap();
+        let offline = [
+            env.claude().join("-tmp-demo/s1/subagents/agent-a1.jsonl"),
+            env.claude().join("-tmp-demo/s2.jsonl"),
+            env.codex().join("sessions/2026/11/20/rollout-b.jsonl"),
+        ];
+        for file in &offline { std::fs::remove_file(file).unwrap(); }
+        opts.rescan = true;
+        let forced = collect_and_save(&opts, &save, &sender);
+        assert!(forced.errors.is_empty(), "{:?}", forced.errors);
+        assert_eq!(forced.files_read, first.files_read - offline.len());
+        assert!(forced.bytes_read > 0);
+        assert_eq!(forced.sessions_changed, 0);
+        assert_eq!(namer.calls.get(), 3);
+        assert_eq!(ledger::load(&home.join("sent.json")).sessions, before);
+        let rebuilt = state::load(&state_path);
+        for key in ["claude_code:s1", "claude_code:s2", "codex:c1"] {
+            assert_eq!(built(&env, &rebuilt, key), built(&env, &expected, key));
+        }
+
+        append_user_line(&env.s1(), "2026-11-20T03:05:00.000Z", "changed");
+        let calls = sender.calls();
+        assert_eq!(collect_and_save(&opts, &save, &sender).sessions_sent, 1);
+        assert_eq!(sender.ids(calls), ["s1"]);
+        opts.rescan = false;
+        assert_eq!(collect_and_save(&opts, &save, &sender).bytes_read, 0);
+    }
+
+    #[test]
+    fn forced_rescan_reads_a_remaining_child_after_its_main_log_was_removed() {
+        let env = Env::new("available_child");
+        let home = env.root.join("home");
+        let sender = FakeSender::ok();
+        let mut opts = env.plain();
+        let first = collect_and_save(&opts, &save_opts(&home), &sender);
+        std::fs::remove_file(env.s1()).unwrap();
+        opts.rescan = true;
+        let report = collect_and_save(&opts, &save_opts(&home), &sender);
+        assert_eq!(report.files_read, first.files_read - 1);
+        assert_eq!(report.sessions_changed, 0);
+        assert!(report.errors.is_empty());
+    }
+
+    #[test]
+    fn forced_rescan_does_not_overwrite_an_unreadable_ledger() {
+        let env = Env::new("forced_bad_ledger");
+        let home = env.root.join("home");
+        let sender = FakeSender::ok();
+        let mut opts = env.plain();
+        collect_and_save(&opts, &save_opts(&home), &sender);
+        let ledger = home.join("sent.json");
+        std::fs::write(&ledger, b"broken").unwrap();
+        let calls = sender.calls();
+        opts.rescan = true;
+        let result = collect_and_save(&opts, &save_opts(&home), &sender);
+        assert!(!result.errors.is_empty());
+        assert_eq!(result.bytes_read, 0);
+        assert_eq!(sender.calls(), calls);
+        assert_eq!(std::fs::read(&ledger).unwrap(), b"broken");
     }
 
     #[test]

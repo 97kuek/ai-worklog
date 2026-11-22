@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::jsonl::read_matching_lines_from;
 use super::time::parse_ts;
-use crate::domain::{Fnv1a, RawSession, TokenEvent, TokenUsage, Tool};
+use crate::domain::{Fnv1a, ObservedState, RawSession, StatusObservation, TokenEvent, TokenUsage, Tool};
 
 const NEEDLES: &[&str] = &[r#""type":"user""#, r#""type":"assistant""#, r#""type":"custom-title""#];
 const MAX_USER_TEXTS: usize = 3;
@@ -27,6 +27,20 @@ struct Line {
     custom_title: Option<String>,
     #[serde(rename = "isMeta", default)]
     is_meta: bool,
+    #[serde(rename = "isSidechain", default)]
+    is_sidechain: bool,
+    #[serde(rename = "agentId")]
+    agent_id: Option<String>,
+    #[serde(rename = "isCompactSummary", default)]
+    is_compact_summary: bool,
+    #[serde(rename = "isApiErrorMessage", default)]
+    is_api_error: bool,
+    #[serde(rename = "promptId")]
+    prompt_id: Option<String>,
+    #[serde(default)]
+    effort: serde_json::Value,
+    #[serde(default, rename = "perTurnEffort")]
+    per_turn_effort: serde_json::Value,
     message: Option<Message>,
 }
 
@@ -36,6 +50,25 @@ struct Message {
     model: Option<String>,
     usage: Option<Usage>,
     content: Option<Content>,
+    stop_reason: Option<String>,
+}
+
+impl Message {
+    fn observed_state(&self, api_error: bool) -> Option<ObservedState> {
+        if api_error {
+            return Some(ObservedState::Unknown);
+        }
+        if let Some(Content::Items(items)) = &self.content
+            && items.iter().any(|i| i.kind.as_deref() == Some("tool_use"))
+        {
+            return Some(ObservedState::Running);
+        }
+        match self.stop_reason.as_deref()? {
+            "end_turn" => Some(ObservedState::Waiting),
+            "tool_use" => Some(ObservedState::Running),
+            _ => Some(ObservedState::Unknown),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -73,6 +106,7 @@ pub struct ClaudeFileState {
     pub raw: RawSession,
     /// (message.id, requestId) のハッシュ
     pub seen: HashSet<u64>,
+    pub prompt_id: Option<String>,
     /// 作業名の材料。main のファイルだけ、最大3件、各300文字まで
     pub user_texts: Vec<String>,
 }
@@ -83,26 +117,36 @@ pub struct ClaudeFile {
     pub is_main: bool,
 }
 
-/// Lists every `<project>/<sessionId>.jsonl` under `projects_dir`, each followed
-/// by its `<project>/<sessionId>/subagents/*.jsonl`.
-pub fn list_claude_files(projects_dir: &Path) -> Vec<ClaudeFile> {
-    let mut files = Vec::new();
+/// Keep available child logs discoverable even if their main log is offline.
+fn claude_file_groups(projects_dir: &Path) -> Vec<Vec<ClaudeFile>> {
+    let mut groups = Vec::new();
     for project in read_dir_paths(projects_dir).into_iter().filter(|p| p.is_dir()) {
-        for main in read_dir_paths(&project) {
-            if main.extension().is_none_or(|e| e != "jsonl") {
-                continue;
+        let mut sessions = BTreeMap::<String, Vec<ClaudeFile>>::new();
+        for path in read_dir_paths(&project) {
+            if path.extension().is_some_and(|e| e == "jsonl") {
+                if let Some(id) = path.file_stem().and_then(|s| s.to_str()).map(str::to_owned) {
+                    sessions.entry(id.clone()).or_default().push(ClaudeFile { path, session_id: id, is_main: true });
+                }
+            } else if path.is_dir() && let Some(id) = path.file_name().and_then(|s| s.to_str()) {
+                for child in read_dir_paths(&path.join("subagents"))
+                    .into_iter().filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
+                {
+                    sessions.entry(id.to_owned()).or_default().push(ClaudeFile {
+                        path: child, session_id: id.to_owned(), is_main: false,
+                    });
+                }
             }
-            let Some(id) = main.file_stem().and_then(|s| s.to_str()).map(str::to_owned) else {
-                continue;
-            };
-            let subagents = read_dir_paths(&project.join(&id).join("subagents"))
-                .into_iter()
-                .filter(|p| p.extension().is_some_and(|e| e == "jsonl"));
-            files.push(ClaudeFile { path: main, session_id: id.clone(), is_main: true });
-            files.extend(subagents.map(|path| ClaudeFile { path, session_id: id.clone(), is_main: false }));
+        }
+        for mut group in sessions.into_values() {
+            group.sort_by_key(|f| !f.is_main);
+            groups.push(group);
         }
     }
-    files
+    groups
+}
+
+pub fn list_claude_files(projects_dir: &Path) -> Vec<ClaudeFile> {
+    claude_file_groups(projects_dir).into_iter().flatten().collect()
 }
 
 /// Reads every `<project>/<sessionId>.jsonl` under `projects_dir` as one
@@ -110,14 +154,9 @@ pub fn list_claude_files(projects_dir: &Path) -> Vec<ClaudeFile> {
 /// Only sessions where the main file or a subagent file was modified at or
 /// after `modified_since` are read.
 pub fn read_claude_sessions(projects_dir: &Path, modified_since: SystemTime) -> Vec<RawSession> {
-    let files = list_claude_files(projects_dir);
     let mut sessions = Vec::new();
-    let mut i = 0;
-    while i < files.len() {
-        let end = files[i + 1..].iter().position(|f| f.is_main).map_or(files.len(), |n| i + 1 + n);
-        let group = &files[i..end];
-        i = end;
-        if !group.iter().any(|f| modified_at_or_after(&f.path, modified_since)) {
+    for group in claude_file_groups(projects_dir) {
+        if !group[0].is_main || !group.iter().any(|f| modified_at_or_after(&f.path, modified_since)) {
             continue;
         }
         let states: Vec<ClaudeFileState> = group
@@ -172,39 +211,71 @@ fn apply_line(st: &mut ClaudeFileState, is_main: bool, line: Line) {
                     raw.git_branch = (!branch.is_empty() && branch != "HEAD").then_some(branch);
                 }
             }
+            let main_turn = is_main && !line.is_meta && !line.is_sidechain && !line.is_compact_summary
+                && line.agent_id.is_none();
             if line.kind == "assistant" {
                 if let Some(msg) = line.message {
-                    add_assistant_usage(st, at, line.request_id, msg);
+                    if main_turn
+                        && (line.prompt_id.is_none() || st.prompt_id.is_none() || line.prompt_id == st.prompt_id)
+                        && let Some(state) = msg.observed_state(line.is_api_error)
+                    {
+                        StatusObservation { state, at }.merge_into(&mut raw.observed_status);
+                    }
+                    let effort = line.effort.as_str().or_else(|| line.per_turn_effort.as_str());
+                    add_assistant_usage(st, at, line.request_id, msg, effort);
                 }
-            } else if is_main
-                && !line.is_meta
-                && st.user_texts.len() < MAX_USER_TEXTS
-                && let Some(text) = line.message.and_then(|m| m.content).and_then(user_text)
-            {
-                st.user_texts.push(text);
+            } else if main_turn && let Some(input) = line.message.and_then(|m| m.content).and_then(user_input) {
+                let state = match input {
+                    UserInput::Prompt(text) => {
+                        if st.user_texts.len() < MAX_USER_TEXTS {
+                            st.user_texts.extend(text);
+                        }
+                        if raw.observed_status.is_none_or(|last| at >= last.at) {
+                            st.prompt_id = line.prompt_id;
+                        }
+                        ObservedState::Running
+                    }
+                    UserInput::Interrupted => ObservedState::Unknown,
+                };
+                StatusObservation { state, at }.merge_into(&mut raw.observed_status);
             }
         }
         _ => {}
     }
 }
 
-/// 人が打った文だけを返す。tool_result やコマンドの記録は材料にしない
-fn user_text(content: Content) -> Option<String> {
-    let text = match content {
-        Content::Text(t) => t,
-        Content::Items(items) => items
-            .into_iter()
-            .filter(|i| i.kind.as_deref() == Some("text"))
-            .filter_map(|i| i.text)
-            .collect::<Vec<_>>()
-            .join("\n"),
+enum UserInput {
+    Prompt(Option<String>),
+    Interrupted,
+}
+
+/// A prompt can contain only an attachment. Only actual user text is naming material.
+fn user_input(content: Content) -> Option<UserInput> {
+    let (text, attachment) = match content {
+        Content::Text(t) => (t, false),
+        Content::Items(items) => {
+            if items.iter().any(|i| i.kind.as_deref() == Some("tool_result")) {
+                return None;
+            }
+            let attachment = items.iter().any(|i| matches!(i.kind.as_deref(), Some("image" | "document")));
+            let text = items.into_iter().filter(|i| i.kind.as_deref() == Some("text"))
+                .filter_map(|i| i.text).collect::<Vec<_>>().join("\n");
+            (text, attachment)
+        }
         Content::Other(_) => return None,
     };
     let text = text.trim();
-    if text.is_empty() || text.starts_with("<command-") || text.starts_with("<local-command") {
+    if text.is_empty() {
+        return attachment.then_some(UserInput::Prompt(None));
+    }
+    if text.starts_with("[Request interrupted by user") {
+        return Some(UserInput::Interrupted);
+    }
+    let control = ["<command-", "<local-command", "<system-reminder", "<task-notification", "<teammate-message"];
+    if control.iter().any(|prefix| text.starts_with(prefix)) {
         return None;
     }
-    Some(text.chars().take(MAX_USER_TEXT_CHARS).collect())
+    Some(UserInput::Prompt(Some(text.chars().take(MAX_USER_TEXT_CHARS).collect())))
 }
 
 /// 同じ応答の usage を二度数えないための印
@@ -217,9 +288,9 @@ fn usage_key(id: &str, request_id: &str) -> u64 {
     h.finish()
 }
 
-fn add_assistant_usage(st: &mut ClaudeFileState, at: i64, request_id: Option<String>, msg: Message) {
+fn add_assistant_usage(st: &mut ClaudeFileState, at: i64, request_id: Option<String>, msg: Message, effort: Option<&str>) {
     if let Some(model) = msg.model.filter(|m| !m.starts_with('<')) {
-        st.raw.models.insert(model);
+        st.raw.record_model(model, effort);
     }
     let Some(u) = msg.usage else {
         return;
@@ -269,6 +340,35 @@ mod tests {
         // 保存する値なので、Rust の版で変わらないこと
         assert_eq!(usage_key("msg_1", "req_1"), 0x0ffd3b0b3d30e173);
         assert_ne!(usage_key("ab", "c"), usage_key("a", "bc"));
+    }
+
+    #[test]
+    fn observes_only_main_prompts_tool_work_and_confirmed_turn_end() {
+        use ObservedState::*;
+        let mut st = ClaudeFileState::default();
+        let mut event = |is_main: bool, kind: &str, second: u8, prompt: &str, message: serde_json::Value| {
+            let line = serde_json::json!({"type":kind, "timestamp":format!("2026-01-01T00:00:{second:02}Z"),
+                "promptId":prompt, "message":message});
+            apply_line(&mut st, is_main, serde_json::from_value(line).unwrap());
+            st.raw.observed_status.map(|s| s.state)
+        };
+        let user = |text: &str| serde_json::json!({"content": text});
+        let stop = || serde_json::json!({"stop_reason":"end_turn","content":[{"type":"text","text":"done"}]});
+        assert_eq!(event(true, "user", 1, "a", user("begin")), Some(Running));
+        assert_eq!(event(true, "assistant", 2, "a", stop()), Some(Waiting));
+        assert_eq!(event(false, "user", 3, "a", user("subagent")), Some(Waiting));
+        let result = serde_json::json!({"content":[{"type":"text","text":"metadata"},{"type":"tool_result"}]});
+        assert_eq!(event(true, "user", 4, "a", result), Some(Waiting));
+        assert_eq!(event(true, "user", 5, "a", user("<task-notification>")), Some(Waiting));
+        assert_eq!(event(true, "user", 6, "b", user("next")), Some(Running));
+        assert_eq!(event(true, "assistant", 7, "a", stop()), Some(Running));
+        let tool = serde_json::json!({"stop_reason":"tool_use", "content":[{"type":"tool_use"}]});
+        assert_eq!(event(true, "assistant", 8, "b", tool), Some(Running));
+        assert_eq!(event(true, "assistant", 3, "b", stop()), Some(Running));
+        assert_eq!(event(true, "user", 9, "b", user("[Request interrupted by user]")), Some(Unknown));
+        let image = serde_json::json!({"content":[{"type":"image"}]});
+        assert_eq!(event(true, "user", 10, "c", image), Some(Running));
+        assert_eq!(st.user_texts, ["begin", "next"]);
     }
 
     fn load() -> Vec<RawSession> {
