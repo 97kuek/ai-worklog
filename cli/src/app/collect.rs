@@ -74,11 +74,9 @@ fn collect_from_home(opts: &CollectOptions, state: &mut State, ledger: &mut Ledg
             if s.tool == Tool::ClaudeCode && let Some(status) = live.get(&s.native_session_id) {
                 status.merge_into(&mut latest);
             }
-            match status_hook::read_latest(home, s.tool, &s.native_session_id) {
-                Ok(Some(status)) => status.merge_into(&mut latest),
-                Ok(None) => {}
-                Err(e) => report.errors.push(format!("cannot read hook status for {}: {e}", b.key)),
-            }
+            let hook = status_hook::read_confirmed(home, s.tool, &s.native_session_id)
+                .unwrap_or_else(|e| { report.errors.push(format!("cannot read hook status for {}: {e}", b.key)); None });
+            if let Some(hook) = &hook { hook.observation().merge_into(&mut latest); }
             if let Some(status) = latest {
                 ledger.sessions.entry(b.key.clone()).or_default().external_status = Some(status);
                 status.merge_into(&mut s.observed_status);
@@ -86,6 +84,15 @@ fn collect_from_home(opts: &CollectOptions, state: &mut State, ledger: &mut Ledg
             if s.tool == Tool::Codex {
                 let entry = ledger.sessions.entry(b.key.clone()).or_default();
                 apply_permission_wait(home, s, b.review.as_ref(), entry, opts.now, &mut report);
+            }
+            if let Some(status) = s.observed_status
+                && opts.now > status.at
+                && !(s.tool == Tool::ClaudeCode && live.contains_key(&s.native_session_id))
+                && hook.is_some_and(|hook| hook.owner_exited(status, b.turn_id.as_deref()))
+            {
+                let exit = StatusObservation { state: ObservedState::Unknown, at: opts.now };
+                s.observed_status = Some(exit);
+                ledger.sessions.entry(b.key.clone()).or_default().external_status = Some(exit);
             }
         }
     }
@@ -402,6 +409,7 @@ fn file_groups(files: &BTreeMap<String, FileEntry>) -> HashMap<String, String> {
 
 struct Built {
     key: String,
+    turn_id: Option<String>,
     review: Option<ReviewContext>,
     session: Session,
     /// 名付けの材料。送らない
@@ -427,7 +435,7 @@ fn build_sessions(opts: &CollectOptions, state: &State, gap_ms: i64) -> Vec<Buil
     for (id, (main, subs)) in claude {
         let Some((_, main)) = main else { continue };
         let Some(session) = merge_claude(Some(main), &subs).and_then(|raw| build_session(raw, gap_ms)) else { continue };
-        out.push(Built { key: format!("claude_code:{id}"), review: None, session, user_texts: main.user_texts.clone() });
+        out.push(Built { key: format!("claude_code:{id}"), turn_id: main.prompt_id.clone(), review: None, session, user_texts: main.user_texts.clone() });
     }
 
     // Codex：同じ thread_id のファイルが2つあれば（move でなく copy）、読み進んだ方だけ使う
@@ -446,7 +454,7 @@ fn build_sessions(opts: &CollectOptions, state: &State, gap_ms: i64) -> Vec<Buil
         let user_texts = main.user_texts.clone();
         let key = format!("codex:{}", raw.native_session_id);
         let Some(session) = build_session(raw, gap_ms) else { continue };
-        out.push(Built { key, review, session, user_texts });
+        out.push(Built { key, turn_id: main.turn_id.clone(), review, session, user_texts });
     }
 
     out.sort_by(|a, b| a.session.started_at.cmp(&b.session.started_at).then_with(|| a.key.cmp(&b.key)));
@@ -1579,6 +1587,43 @@ mod tests {
         add(11, "turn_context", reviewer("two", "user"));
         assert_eq!(status().as_deref(), Some("unknown"));
         assert_eq!(status(), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_dead_hook_owner_clears_only_its_still_running_turn_once() {
+        let env = Env::new("dead-owner");
+        let home = env.root.join("home");
+        let save = save_opts(&home);
+        let sender = FakeSender::ok();
+        let opts = env.plain();
+        let base = opts.now - 10_000;
+        let project = env.claude().join("-tmp-demo");
+        let status_dir = home.join("status/claude");
+        std::fs::create_dir_all(&status_dir).unwrap();
+        for (id, turn, state) in [
+            ("dead", "one", "running"), ("resumed", "two", "running"),
+            ("waiting", "one", "waiting"), ("legacy", "one", "running"),
+        ] {
+            let at = crate::adapters::time::format_ts(base + 2);
+            let mut event = serde_json::json!({"type":"user","promptId":turn,"timestamp":at,"message":{"content":"hi"}});
+            if state == "waiting" {
+                event = serde_json::json!({"type":"assistant","promptId":turn,"timestamp":at,"message":{"stop_reason":"end_turn"}});
+            }
+            std::fs::write(project.join(format!("{id}.jsonl")), format!("{event}\n")).unwrap();
+            let mut hook = serde_json::json!({"at_ns":base * 1_000_000, "state":"running"});
+            if id != "legacy" {
+                hook["owner"] = serde_json::json!({"pid":2147483646,"start_us":1,"turn_id":"one"});
+            }
+            std::fs::write(status_dir.join(format!("{id}.json")), hook.to_string()).unwrap();
+        }
+        collect_and_save(&opts, &save, &sender);
+        let sent = sender.sessions(0);
+        assert_eq!(session(&sent, "dead")["observed_status"]["state"], "unknown");
+        assert_eq!(session(&sent, "resumed")["observed_status"]["state"], "running");
+        assert_eq!(session(&sent, "waiting")["observed_status"]["state"], "waiting");
+        assert_eq!(session(&sent, "legacy")["observed_status"]["state"], "running");
+        assert_eq!(collect_and_save(&opts, &save, &sender), CollectReport::default());
     }
 
     #[test]

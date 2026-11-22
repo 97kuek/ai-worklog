@@ -164,6 +164,54 @@ fn status_hook_persists_only_observations_and_coalesces_collection_requests() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn native_hook_owner_is_bound_to_the_cli_process_and_turn() {
+    const TEST_TOOL: &str = "TASKFOLIO_TEST_HOOK_OWNER_TOOL";
+    if let Ok(tool) = std::env::var(TEST_TOOL) {
+        let status = Command::new("/bin/sh")
+            .args(["-c", r#"exec "$1" hook-status "$2""#, "hook"])
+            .arg(env!("CARGO_BIN_EXE_taskfolio")).arg(tool)
+            .stdin(std::fs::File::open("input.json").unwrap())
+            .status().unwrap();
+        assert!(status.success());
+        return;
+    }
+    let home = temp_dir("native-hook-owner");
+    let events = [
+        ("claude", "claude/versions/2.1.330", "prompt_id"),
+        ("codex", "bin/codex", "turn_id"),
+    ];
+    for (tool, relative, turn_key) in events {
+        // A native parent at a supported installation path, with a command hook
+        // launched through /bin/sh. No vendor account or live session is needed.
+        let parent = home.join(relative);
+        std::fs::create_dir_all(parent.parent().unwrap()).unwrap();
+        std::fs::copy(std::env::current_exe().unwrap(), &parent).unwrap();
+        let hook = serde_json::json!({
+            "session_id":"test-session", "hook_event_name":"UserPromptSubmit",
+            turn_key:"test-turn", "prompt":"private input",
+        });
+        let input = home.join("input.json");
+        std::fs::write(&input, hook.to_string()).unwrap();
+        let mut child = Command::new(parent)
+            .args(["--exact", "native_hook_owner_is_bound_to_the_cli_process_and_turn"])
+            .current_dir(&home).env("TASKFOLIO_HOME", &home).env(TEST_TOOL, tool)
+            .spawn().unwrap();
+        let pid = child.id();
+        assert!(child.wait().unwrap().success());
+        let file = home.join(format!("status/{tool}/test-session.json"));
+        let hook: serde_json::Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+        let owner = &hook["owner"];
+        assert_eq!(owner["pid"], pid);
+        assert!(owner["start_us"].as_u64().unwrap() > 0);
+        assert_eq!(owner["turn_id"], "test-turn");
+        assert_eq!(owner.as_object().unwrap().len(), 3);
+        assert_eq!(hook.as_object().unwrap().len(), 3);
+    }
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 #[test]
 fn skills_queries_installed_plugins_before_the_workspace_snapshot() {
     use std::os::unix::fs::PermissionsExt;

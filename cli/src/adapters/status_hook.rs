@@ -7,6 +7,7 @@ use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 
 use super::fsutil::{open_private_file, write_atomically};
+use super::hook_process::ProcessIdentity;
 use crate::domain::{ObservedState, StatusObservation, Tool};
 
 #[derive(Deserialize)]
@@ -14,6 +15,7 @@ struct HookInput {
     session_id: String,
     hook_event_name: String,
     turn_id: Option<String>,
+    prompt_id: Option<String>,
     agent_id: Option<String>,
     notification_type: Option<String>,
     last_assistant_message: Option<String>,
@@ -63,7 +65,7 @@ impl HookInput {
             (Tool::Codex, "Interrupt") | (Tool::ClaudeCode, "StopFailure") => Unknown,
             _ => return None,
         };
-        Some(Evidence::Observed { state })
+        Some(Evidence::Observed { state, owner: None })
     }
 }
 
@@ -81,6 +83,8 @@ struct Snapshot {
 enum Evidence {
     Observed {
         state: ObservedState,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<RunningOwner>,
     },
     // Codex sends this before resolving approval hooks and choosing the reviewer.
     PermissionRequest {
@@ -90,20 +94,49 @@ enum Evidence {
     },
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
-struct TimedState {
+#[derive(Clone, Serialize, Deserialize)]
+struct RunningOwner {
+    #[serde(flatten)]
+    process: ProcessIdentity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    turn_id: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct TimedState {
     at_ns: u64,
     state: ObservedState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner: Option<RunningOwner>,
+}
+
+impl TimedState {
+    pub(crate) fn observation(&self) -> StatusObservation {
+        StatusObservation { state: self.state, at: (self.at_ns / 1_000_000) as i64 }
+    }
+
+    pub(crate) fn owner_exited(&self, current: StatusObservation, turn_id: Option<&str>) -> bool {
+        let Some(owner) = &self.owner else { return false };
+        // A later log-only turn can belong to an untracked client that resumed
+        // this same session. Only extend the hook's evidence across matching turns.
+        let matches_turn = match (owner.turn_id.as_deref(), turn_id) {
+            (Some(hook), Some(log)) => hook == log,
+            _ => current == self.observation(),
+        };
+        self.state == ObservedState::Running && current.state == ObservedState::Running
+            && matches_turn && owner.process.exited()
+    }
 }
 
 impl Snapshot {
     fn confirmed(&self) -> Option<TimedState> {
-        match self.evidence {
-            Evidence::Observed { state } => Some(TimedState {
+        match &self.evidence {
+            Evidence::Observed { state, owner } => Some(TimedState {
                 at_ns: self.at_ns,
-                state,
+                state: *state,
+                owner: owner.clone(),
             }),
-            Evidence::PermissionRequest { last_confirmed, .. } => last_confirmed,
+            Evidence::PermissionRequest { last_confirmed, .. } => last_confirmed.clone(),
         }
     }
 
@@ -112,7 +145,7 @@ impl Snapshot {
             return false;
         };
         let Some(confirmed) = old.confirmed() else { return false };
-        if last_confirmed.is_some_and(|prior| prior.at_ns >= confirmed.at_ns) {
+        if last_confirmed.as_ref().is_some_and(|prior| prior.at_ns >= confirmed.at_ns) {
             return false;
         }
         *last_confirmed = Some(confirmed);
@@ -149,15 +182,12 @@ fn read_snapshot(path: &Path) -> io::Result<Option<Snapshot>> {
 
 /// Latest confirmed hook state, including the state immediately before a permission request.
 pub fn read_latest(home: &Path, tool: Tool, session_id: &str) -> io::Result<Option<StatusObservation>> {
-    let Some(path) = path_for(home, tool, session_id) else {
-        return Ok(None);
-    };
-    Ok(read_snapshot(&path)?
-        .and_then(|snap| snap.confirmed())
-        .map(|state| StatusObservation {
-            state: state.state,
-            at: (state.at_ns / 1_000_000) as i64,
-        }))
+    Ok(read_confirmed(home, tool, session_id)?.map(|snap| snap.observation()))
+}
+
+pub(crate) fn read_confirmed(home: &Path, tool: Tool, session_id: &str) -> io::Result<Option<TimedState>> {
+    let Some(path) = path_for(home, tool, session_id) else { return Ok(None) };
+    Ok(read_snapshot(&path)?.and_then(|snap| snap.confirmed()))
 }
 
 /// Returns only a pending permission request for the specified human-reviewed turn.
@@ -204,12 +234,18 @@ pub fn record(home: &Path, tool: Tool, input: impl Read) -> io::Result<()> {
         .map_err(io::Error::other)?;
     let at_ns = u64::try_from(time.as_nanos()).map_err(io::Error::other)?;
     let event: HookInput = serde_json::from_reader(BufReader::new(input))?;
-    let Some(evidence) = event.evidence(tool) else {
+    let Some(mut evidence) = event.evidence(tool) else {
         return Ok(());
     };
     let Some(path) = path_for(home, tool, &event.session_id) else {
         return Ok(());
     };
+    if let Evidence::Observed { state: ObservedState::Running, owner } = &mut evidence {
+        let turn_id = match tool { Tool::ClaudeCode => event.prompt_id, Tool::Codex => event.turn_id };
+        *owner = ProcessIdentity::for_hook(tool).map(|process| RunningOwner {
+            process, turn_id: turn_id.filter(|id| valid_id(id)),
+        });
+    }
     update(&path, Snapshot { evidence, at_ns })?;
     open_private_file(&collect_queue(home), "pending")?;
     Ok(())
@@ -245,7 +281,7 @@ mod tests {
         fields["hook_event_name"] = event.into();
         fields["session_id"] = "session".into();
         match serde_json::from_value::<HookInput>(fields).unwrap().evidence(tool)? {
-            Evidence::Observed { state } => Some(state),
+            Evidence::Observed { state, .. } => Some(state),
             Evidence::PermissionRequest { .. } => None,
         }
     }
@@ -385,7 +421,7 @@ mod tests {
                 &path,
                 Snapshot {
                     at_ns,
-                    evidence: Evidence::Observed { state },
+                    evidence: Evidence::Observed { state, owner: None },
                 },
             )
             .unwrap();
@@ -413,6 +449,7 @@ mod tests {
                         path,
                         Snapshot {
                             evidence: Evidence::Observed {
+                                owner: None,
                                 state: if n == 12 { Waiting } else { Running },
                             },
                             at_ns: n * 1_000_000,
