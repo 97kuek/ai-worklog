@@ -11,7 +11,7 @@ it("creates the initial tables", async () => {
 it("serves the static page outside /api", async () => {
   const res = await SELF.fetch("https://example.com/");
   expect(res.status).toBe(200);
-  expect(await res.text()).toContain("ai-worklog");
+  expect(await res.text()).toContain("Work log | Taskfolio");
 });
 
 it("requires authentication for unknown API paths", async () => {

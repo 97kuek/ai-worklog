@@ -1,0 +1,185 @@
+.office-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 2.65fr) minmax(232px, 1fr);
+  align-items: start;
+  gap: clamp(20px, 3vw, 40px);
+  color: var(--ink);
+}
+.office-scene-panel {
+  min-width: 0;
+}
+.office-stage {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--accent) 7%, var(--white));
+  border: 1px solid var(--line-soft);
+  border-radius: 16px;
+}
+.office-viewport {
+  aspect-ratio: 1.55;
+  width: 100%;
+  cursor: grab;
+}
+.office-viewport:active { cursor: grabbing; }
+.office-viewport.has-task { cursor: pointer; }
+.office-viewport canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.office-scene-status,
+.office-tooltip {
+  position: absolute;
+  max-width: calc(100% - 16px);
+  padding: 5px 12px;
+  border-radius: 8px;
+  font-size: 16px;
+  pointer-events: none;
+}
+.office-scene-status {
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  color: var(--muted);
+  background: var(--white);
+  text-align: center;
+}
+.office-layout[data-scene="unavailable"] .office-viewport {
+  background: url("/office/empty.webp") center / contain no-repeat;
+  cursor: default;
+}
+.office-layout[data-scene="unavailable"] .office-scene-status {
+  top: auto;
+  bottom: 12px;
+  transform: translateX(-50%);
+}
+.office-tooltip {
+  background: var(--ink);
+  color: var(--white);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.office-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  min-height: 52px;
+  padding-top: 6px;
+  gap: 8px;
+}
+.office-layout:not([data-scene="ready"]) .office-toolbar { visibility: hidden; }
+.office-hint,
+.office-summary,
+.office-task-meta {
+  color: var(--muted);
+  font-size: 16px;
+}
+.office-camera-tools,
+.office-paging {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.office-control,
+.office-reset {
+  min-width: 40px;
+  min-height: 40px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: var(--pill);
+  line-height: 1;
+  font-size: 20px;
+}
+.office-reset {
+  font-size: 16px;
+  min-width: auto;
+  padding-inline: 12px;
+}
+.office-control:disabled { cursor: default; opacity: 0.4; }
+.office-roster {
+  min-width: 0;
+}
+.office-roster-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 15px;
+  border-bottom: 1px solid var(--line);
+}
+.office-roster-head h2 { font-size: 20px; font-weight: 650; line-height: 1.3; margin: 0; }
+.office-count {
+  min-width: 30px;
+  padding: 1px 9px;
+  text-align: center;
+  border-radius: var(--pill);
+  background: var(--paper);
+  color: var(--accent);
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.office-desks {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.office-desks li {
+  border-bottom: 1px solid var(--line-soft);
+}
+.office-task {
+  display: flex;
+  width: 100%;
+  min-height: 66px;
+  align-items: start;
+  text-align: left;
+  gap: 14px;
+  padding: 13px 6px;
+  border-radius: 6px;
+}
+.office-seat {
+  flex: none;
+  font-size: 16px;
+  color: var(--accent);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.office-task-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+.office-task-title {
+  font-size: 16px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.office-task-meta {
+  overflow-wrap: anywhere;
+}
+.office-paging {
+  justify-content: space-between;
+  padding-top: 8px;
+}
+.office-room-label {
+  font-variant-numeric: tabular-nums;
+  font-size: 16px;
+}
+.office-task.is-highlighted,
+.office-task:focus-visible { background: var(--paper); }
+@media (hover: hover) {
+  .office-task:hover,
+  .office-control:hover:enabled,
+  .office-reset:hover { background: var(--paper); }
+}
+@media (max-width: 800px) {
+  .office-layout { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+  .office-viewport { aspect-ratio: 1.6; }
+  .office-task { min-height: 60px; }
+}
+@media (max-width: 460px) {
+  .office-stage { border-radius: 12px; }
+  .office-viewport { aspect-ratio: 1.33; }
+  .office-control, .office-reset { min-height: 44px; }
+}

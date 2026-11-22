@@ -6,6 +6,7 @@ cli/target/
 
 # Node / Cloudflare Workers
 node_modules/
+worker/public/assets/
 .wrangler/
 .dev.vars
 .env
