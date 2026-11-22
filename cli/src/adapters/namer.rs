@@ -102,8 +102,13 @@ pub fn sanitize_title(raw: &str) -> Option<String> {
     let t = t.trim_end_matches('。').trim();
     let t = t.trim_matches(|c| matches!(c, '「' | '」' | '『' | '』' | '"' | '\'' | '“' | '”' | '‘' | '’'));
     let t = t.trim();
-    let n = t.chars().count();
-    if (1..=15).contains(&n) { Some(t.to_string()) } else { None }
+    let w = display_width(t);
+    if t.is_empty() || w > 30 { None } else { Some(t.to_string()) }
+}
+
+/// 表示幅。ASCII は 1、それ以外は 2。全角15文字 = 30
+fn display_width(s: &str) -> usize {
+    s.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum()
 }
 
 #[cfg(test)]
@@ -113,7 +118,7 @@ mod tests {
 
     #[test]
     fn sanitize_accepts_short_single_line() {
-        assert_eq!(sanitize_title("検証基盤の構築\n").as_deref(), Some("検証基盤の構築"));
+        assert_eq!(sanitize_title("LibreOffice検証基盤の構築\n").as_deref(), Some("LibreOffice検証基盤の構築"));
         assert_eq!(sanitize_title("「認証の実装」").as_deref(), Some("認証の実装"));
         assert_eq!(sanitize_title("作業名：認証の実装").as_deref(), Some("認証の実装"));
         assert_eq!(sanitize_title("作業名: 認証の実装。").as_deref(), Some("認証の実装"));
@@ -124,6 +129,8 @@ mod tests {
         assert_eq!(sanitize_title(""), None);
         assert_eq!(sanitize_title("一\n二"), None);
         assert_eq!(sanitize_title("あいうえおかきくけこさしすせそた"), None);
+        assert_eq!(sanitize_title(&"a".repeat(30)).as_deref(), Some("a".repeat(30).as_str()));
+        assert_eq!(sanitize_title(&"a".repeat(31)), None);
         assert_eq!(sanitize_title("あいうえおかきくけこさしすせそ").as_deref(), Some("あいうえおかきくけこさしすせそ"));
     }
 
