@@ -39,9 +39,15 @@ function machinePanel(machine: Machine, actions: Actions, signal: AbortSignal) {
 
   const testResult = el("p", "connection-result");
   testResult.setAttribute("role", "status");
+  const engineList = el("dl", "engine-status");
   const showStatus = (m: Machine) => {
     status.textContent = m.seen_at === null ? "Runner has not connected yet"
       : (m.online ? "Online" : "Offline") + " · Last check-in " + stamp.format(m.seen_at);
+    engineList.replaceChildren();
+    for (const key of ["claude_code", "codex"]) {
+      const available = m.engines.includes(key) ? "Available" : m.seen_at === null ? "Unknown" : "Unavailable";
+      engineList.append(el("dt", "", engineName(key)), el("dd", "", available));
+    }
   };
   showStatus(machine);
   panel.append(header, testResult);
@@ -116,12 +122,7 @@ function machinePanel(machine: Machine, actions: Actions, signal: AbortSignal) {
     folders.append(row, error);
   }
   const engines = el("section", "settings-group");
-  engines.append(el("h3", "", "Engines"));
-  const list = el("dl", "engine-status");
-  for (const key of ["claude_code", "codex"]) {
-    list.append(el("dt", "", engineName(key)), el("dd", "", machine.engines.includes(key) ? "Available" : machine.seen_at === null ? "Unknown" : "Unavailable"));
-  }
-  engines.append(list);
+  engines.append(el("h3", "", "Engines"), engineList);
   panel.append(folders, engines);
   return panel;
 }

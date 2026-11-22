@@ -22,6 +22,7 @@ export const requestErrorMessages: Record<string, string> = {
 const failureMessages: Record<string, string> = {
   runner_timeout: "The Mac did not start this request in time. Check the runner is online before retrying.",
   invalid_project: "Check the project name and its registered folder on the Mac.",
+  project_disabled: "This working folder was paused before the task started. Enable it in Settings before retrying.",
   unsupported_engine: "Select an engine the Mac supports.",
   invalid_model: "Select a model supported by this engine or use its default.",
   invalid_effort: "Select an effort supported by this engine or use its default.",
