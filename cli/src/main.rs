@@ -138,14 +138,6 @@ fn user_home() -> PathBuf {
 
 fn run_collect(rescan: bool) -> ExitCode {
     let home = config::home_dir();
-    let cfg = match config::load(&home.join("config.json")) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("taskfolio: {e}");
-            eprintln!("taskfolio: run `taskfolio login --url <API_URL> --machine-name <NAME> --client-id <ID>` first");
-            return ExitCode::from(2);
-        }
-    };
     let _lock = match acquire_lock(&home) {
         Ok(Some(l)) => l,
         Ok(None) => {
@@ -155,6 +147,14 @@ fn run_collect(rescan: bool) -> ExitCode {
         Err(e) => {
             eprintln!("taskfolio: cannot take lock in {}: {e}", home.display());
             return ExitCode::FAILURE;
+        }
+    };
+    let cfg = match config::load(&home.join("config.json")) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("taskfolio: {e}");
+            eprintln!("taskfolio: run `taskfolio login --url <API_URL> --machine-name <NAME> --client-id <ID>` first");
+            return ExitCode::from(2);
         }
     };
     let secret = match keychain::read_secret(&cfg.client_id) {
@@ -325,6 +325,7 @@ fn run_setup(mut parser: lexopt::Parser) -> Result<ExitCode, lexopt::Error> {
     } else {
         let loaded = (|| -> Result<(), String> {
             fsutil::create_private_dir(&home.join("logs")).map_err(|e| format!("cannot create logs dir: {e}"))?;
+            fsutil::create_private_dir(&status_hook::collect_queue(&home)).map_err(|e| format!("cannot create collect queue: {e}"))?;
             let dir = plist_path.parent().ok_or("bad plist path")?;
             std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
             std::fs::write(&plist_path, &plist).map_err(|e| format!("cannot write {}: {e}", plist_path.display()))?;

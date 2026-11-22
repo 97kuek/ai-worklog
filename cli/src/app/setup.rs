@@ -16,12 +16,13 @@ fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
-/// launchd のジョブ定義。10分ごとと、ログイン時に `taskfolio collect` を動かす。
+/// launchd のジョブ定義。状態通知、10分ごと、ログイン時に `taskfolio collect` を動かす。
 /// 報告は collect.log に残るので標準出力は捨て、標準エラーだけ launchd.log に残す
 pub fn launch_agent_plist(exe: &Path, home: &Path) -> String {
     let exe = xml_escape(&exe.display().to_string());
     let log = xml_escape(&home.join("logs").join("launchd.log").display().to_string());
     let home_s = xml_escape(&home.display().to_string());
+    let queue = xml_escape(&crate::adapters::status_hook::collect_queue(home).display().to_string());
     // launchd の PATH は最小限なので、naming.command（claude）を見つけられるよう足す
     let user_home = std::env::var("HOME").unwrap_or_default();
     let path = xml_escape(&format!(
@@ -41,6 +42,12 @@ pub fn launch_agent_plist(exe: &Path, home: &Path) -> String {
   </array>
   <key>StartInterval</key>
   <integer>600</integer>
+  <key>QueueDirectories</key>
+  <array>
+    <string>{queue}</string>
+  </array>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
   <key>RunAtLoad</key>
   <true/>
   <key>ProcessType</key>
@@ -315,12 +322,15 @@ mod tests {
     }
 
     #[test]
-    fn plist_runs_collect_every_ten_minutes() {
+    fn plist_wakes_for_pending_status_and_keeps_periodic_collection() {
         let p = launch_agent_plist(Path::new("/opt/bin/taskfolio"), Path::new("/Users/x/.taskfolio"));
         for needle in [
             "<string>/opt/bin/taskfolio</string>",
             "<string>collect</string>",
             "<integer>600</integer>",
+            "<key>QueueDirectories</key>",
+            "<string>/Users/x/.taskfolio/collect-queue</string>",
+            "<key>ThrottleInterval</key>\n  <integer>30</integer>",
             "RunAtLoad",
             "<key>ProcessType</key>",
             "<string>Background</string>",

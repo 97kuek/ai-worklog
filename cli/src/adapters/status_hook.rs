@@ -1,13 +1,12 @@
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{self, BufReader, Read};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 
-use super::fsutil::{create_private_dir, write_atomically};
+use super::fsutil::{open_private_file, write_atomically};
 use crate::domain::{ObservedState, StatusObservation, Tool};
 
 #[derive(Deserialize)]
@@ -186,6 +185,19 @@ pub fn read_for_turn(
     }))
 }
 
+pub fn collect_queue(home: &Path) -> PathBuf {
+    home.join("collect-queue")
+}
+
+/// Consume the single wakeup before reading any snapshots. Events arriving during
+/// a slow collection then leave the queue nonempty for launchd's next run.
+pub(crate) fn take_collect_request(home: &Path) -> io::Result<()> {
+    match fs::remove_file(collect_queue(home).join("pending")) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
+}
+
 pub fn record(home: &Path, tool: Tool, input: impl Read) -> io::Result<()> {
     let time = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -198,19 +210,15 @@ pub fn record(home: &Path, tool: Tool, input: impl Read) -> io::Result<()> {
     let Some(path) = path_for(home, tool, &event.session_id) else {
         return Ok(());
     };
-    update(&path, Snapshot { evidence, at_ns })
+    update(&path, Snapshot { evidence, at_ns })?;
+    open_private_file(&collect_queue(home), "pending")?;
+    Ok(())
 }
 
 fn update(path: &Path, mut next: Snapshot) -> io::Result<()> {
     let dir = path.parent().expect("snapshot path has a parent");
-    create_private_dir(dir)?;
     // Lock a stable inode: the snapshot itself is replaced atomically for lock-free readers.
-    let lock = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(dir.join("write.lock"))?;
+    let lock = open_private_file(dir, "write.lock")?;
     lock.lock()?;
     if let Some(mut old) = read_snapshot(path)? {
         if old.at_ns > next.at_ns {
