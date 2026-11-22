@@ -136,6 +136,9 @@ export function requestComposer(
       id = crypto.randomUUID();
     };
     projectField.append(projectLabel);
+    const projectControl = el("div", "project-control");
+    projectControl.append(projectInput);
+    projectField.append(projectControl);
     let projectFocus: HTMLElement = projectInput;
     if (projects.length) {
       const options: [string, string][] = projects.map(p => ["project:" + p, p]);
@@ -145,20 +148,25 @@ export function requestComposer(
         const isNew = value === "new";
         projectInput.hidden = !isNew;
         projectInput.required = isNew;
+        projectControl.classList.toggle("entering-name", isNew);
         projectFocus = isNew ? projectInput : menu.trigger;
+        projectLabel.htmlFor = projectFocus.id;
+        if (isNew) {
+          menu.trigger.textContent = "";
+          menu.trigger.setAttribute("aria-label", "Choose project");
+        }
         selectProject(isNew ? projectInput.value.trim() || null : value.slice("project:".length) || null);
         error.textContent = "";
         id = crypto.randomUUID();
         if (isNew) projectInput.focus();
       });
       projectFocus = menu.trigger;
-      projectField.append(menu.root);
+      projectControl.append(menu.root);
       projectInput.hidden = true;
     } else {
       projectInput.required = original?.project !== null;
     }
     projectLabel.htmlFor = projectFocus.id;
-    projectField.append(projectInput);
     choices.append(projectField, engineSlot, modelSlot, effortSlot);
     renderEngine();
     if (original) {
