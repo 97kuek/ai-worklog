@@ -73,6 +73,25 @@ it("selects the newest eligible Mac, snapshots the card, and claims and complete
   expect((await s.start(crypto.randomUUID())).status).toBe(409);
 });
 
+it("assigns a manual start to an idle Mac while a more recently seen Mac is running", async () => {
+  const s = await setup();
+  await s.queue();
+  await s.claim(s.otherMac);
+  s.tick(1);
+  await s.claim();
+  const first = crypto.randomUUID();
+  await s.start(first);
+  await s.claim();
+  expect((await s.result(first, "running")).status).toBe(200);
+
+  const path = "/api/board/requests/" + crypto.randomUUID();
+  await s.call(path, s.user, "PUT", card);
+  await s.call(path, s.user, "PUT", { stage: "queued" });
+  const second = crypto.randomUUID();
+  expect((await s.call(path + "/start", s.user, "POST", { attempt_id: second })).status).toBe(200);
+  expect(await (await s.claim(s.otherMac)).json()).toMatchObject({ job: { attempt_id: second } });
+});
+
 it("removes completed launches from both Board reads after seven days and keeps execution history", async () => {
   const s = await setup();
   await s.queue();
@@ -80,9 +99,11 @@ it("removes completed launches from both Board reads after seven days and keeps 
   await s.start(attempt);
   await s.claim();
   await s.result(attempt, "running");
+  s.tick(8 * 86_400_000);
   await s.result(attempt, "completed");
   s.tick(7 * 86_400_000 - 1);
   expect((await s.board()).requests).toHaveLength(1);
+  expect((await s.result(attempt, "completed")).status).toBe(200);
   s.tick(1);
   expect((await s.board()).requests).toEqual([]);
   expect(await (await s.call("/api/board/requests", s.user, "GET")).json()).toEqual({ requests: [] });
