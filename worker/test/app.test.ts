@@ -83,6 +83,19 @@ it("fails_closed_when_owner_email_is_missing", async () => {
   expect(await count("users")).toBe(0);
 });
 
+it("logs_config_errors_with_the_setting_name_but_not_in_the_response", async () => {
+  const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const { app, userToken } = await testApp();
+    const res = await app.request("/api/me", { headers: { [H]: await userToken() } }, { ...env, OWNER_EMAIL: "" });
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "misconfigured" });
+    expect(spy.mock.calls.flat().join(" ")).toContain("OWNER_EMAIL");
+  } finally {
+    spy.mockRestore();
+  }
+});
+
 it("leaves_static_paths_alone", async () => {
   const res = await SELF.fetch("https://example.com/");
   expect(res.status).toBe(200);
