@@ -27,6 +27,7 @@ function route(): View {
 let view = route();
 let anchor = new Date();
 anchor.setHours(0, 0, 0, 0);
+let weekProjects: (string | null)[] | undefined;
 let statsPeriod: "daily" | "weekly" = "daily";
 function isDaily() {
   return view === "stats" && statsPeriod === "daily";
@@ -203,7 +204,15 @@ async function load(done = "") {
       const data = await api<WeekData>("/api/blocks?" + q, { signal: controller.signal });
       if (controller.signal.aborted) return;
       if (view === "calendar") renderCalendar(root, data.sessions, data.blocks, start, showDetail);
-      else if (view === "stats") renderStats(root, data, start, end);
+      else if (view === "stats") renderStats(root, data, start, end, {
+        weekly: !isDaily(),
+        weekProjects,
+        openDay(date, projects) {
+          statsPeriod = "daily";
+          goDate(date, projects);
+          node("daily").focus({ preventScroll: true });
+        },
+      });
       else renderLog(root, data, start, filters, showDetail);
     }
     displayedScope = scope;
@@ -220,7 +229,8 @@ async function load(done = "") {
     }
   }
 }
-function goDate(d: Date) {
+function goDate(d: Date, projects?: (string | null)[]) {
+  weekProjects = projects;
   anchor = new Date(d.getFullYear(), d.getMonth(), d.getDate());
   filters.day = null;
   void load();
@@ -231,6 +241,7 @@ node("today").onclick = () => goDate(new Date());
 for (const period of ["daily", "weekly"] as const) {
   node(period).onclick = () => {
     if (statsPeriod === period) return;
+    weekProjects = undefined;
     statsPeriod = period;
     void load();
   };

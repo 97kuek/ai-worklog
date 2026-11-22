@@ -113,13 +113,43 @@
 .stats-hour[aria-pressed="true"] {
   background: var(--selected-fill);
 }
-.stats-bar {
+.stats-stack {
+  display: flex;
+  flex-direction: column-reverse;
   width: 64%;
-  background: var(--accent);
+  max-width: 4rem;
   pointer-events: none;
 }
-.stats-bar.has-time {
-  min-height: 1px;
+.series-0 { background: var(--accent); }
+.series-1 { background: var(--ink); }
+.series-2 { background: repeating-linear-gradient(135deg, var(--accent) 0 2px, var(--selected-fill) 2px 5px); }
+.series-3 { background: var(--line-strong); }
+.series-4 { background: repeating-linear-gradient(0deg, var(--line-strong) 0 2px, var(--line-soft) 2px 4px); }
+.weekly-plot { padding-bottom: 1.75rem; }
+.weekly-plot .stats-bars { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+.stats-day-label {
+  position: absolute;
+  top: 100%;
+  padding-top: 4px;
+  color: var(--ink);
+}
+.stats-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  list-style: none;
+  padding: 0;
+  margin: 16px 0 0;
+}
+.stats-legend li { display: flex; align-items: center; gap: 6px; overflow-wrap: anywhere; min-width: 0; }
+.stats-swatch { width: 12px; height: 12px; flex: none; }
+.stats-table.project-table { min-width: 0; margin-top: 16px; table-layout: fixed; }
+.project-table th:first-child { width: 54%; }
+.project-table th:nth-child(2), .project-table td:nth-child(2) { text-align: right; }
+.project-table td { vertical-align: top; }
+@media (max-width: 550px) {
+  .stats-table.project-table :is(td, th) { padding-inline: 6px; }
+  .project-table th:first-child { width: 48%; }
 }
 .stats-ticks {
   grid-column: 2;

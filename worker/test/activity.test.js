@@ -68,3 +68,24 @@ it("keeps recorded engine, model and effort pairs distinct, counting each task o
     { tool: "codex", model: "m", effort: "low", count: 1 },
   ]);
 });
+
+it("groups clipped work by weekday and project and counts unique tasks in each scope", () => {
+  const projects = [
+    { ...sessions[0], project: "studio" }, { ...sessions[1], project: "studio" }, { ...sessions[2], project: null },
+  ];
+  const blocks = [
+    block("a", at(21, 23), at(22, 1)),
+    block("a", at(22, 23, 30), at(23, 0, 30)),
+    block("b", at(22, 0), at(22, 0, 45)),
+    block("c", at(23, 0), at(23, 0, 10)),
+    block("c", at(24, 9), at(24, 9)),
+    block("c", at(29, 0), at(29, 1)),
+  ];
+  const s = summarizeActivity({ sessions: projects, blocks }, start, at(29, 0));
+  expect(s.days.map(day => day.ms / 60000)).toEqual([135, 40, 0, 0, 0, 0, 0]);
+  expect(s.period.projects.get("studio")).toEqual({ ms: 165 * 60000, tasks: new Set(["a", "b"]) });
+  expect(s.days[1].projects.get("studio").tasks.size).toBe(1);
+  expect(s.days[2].projects.get(null)).toEqual({ ms: 0, tasks: new Set(["c"]) });
+  expect(s.hours[0].projects.get(null).ms).toBe(10 * 60000);
+  expect(s.days.reduce((sum, day) => sum + day.ms, 0)).toBe(s.totalMs);
+});
