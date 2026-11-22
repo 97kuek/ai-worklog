@@ -1,3 +1,4 @@
+import { completedBoardWindow } from "./board-retention.js";
 import { planningLanes, type BoardRequest, type SaveRequest } from "./planning.js";
 import { countLabel, el, engineName, stateOf, statusLabel, titleOf, type Session } from "./shared.js";
 
@@ -41,8 +42,11 @@ export function renderBoard(
     board.classList.remove("is-dragging");
   }
 
+  let pruneCompleted = () => {};
+  const cutoff = Date.now() - completedBoardWindow;
   for (const state of lanes) {
-    const items = sorted.filter((session) => stateOf(session) === state);
+    const items = sorted.filter((session) => stateOf(session) === state &&
+      (state !== "completed" || Date.parse(updateTime(session)) > cutoff));
     const lane = el("section", "board-lane board-" + state);
     const heading = el("h2", "board-lane-heading", statusLabel(state));
     const count = el("span", "board-count", String(items.length));
@@ -50,8 +54,10 @@ export function renderBoard(
     heading.append(count);
     lane.append(heading);
     const list = el("ul", "board-list");
+    const expirations: { at: number; card: HTMLElement }[] = [];
     for (const session of items) {
       const card = el("li", "board-card");
+      if (state === "completed") expirations.push({ at: Date.parse(updateTime(session)) + completedBoardWindow, card });
       const title = titleOf(session);
       const action = el("button", "board-title", title);
       action.type = "button";
@@ -109,9 +115,21 @@ export function renderBoard(
     }
     if (state !== "waiting") {
       activity[state].countRequests = n => {
-        count.textContent = String(items.length + n);
-        count.setAttribute("aria-label", countLabel(items.length + n, "task"));
+        const total = list.childElementCount + n;
+        count.textContent = String(total);
+        count.setAttribute("aria-label", countLabel(total, "task"));
       };
+      if (state === "completed") {
+        heading.title = "Completed in the last 7 days";
+        pruneCompleted = () => {
+          const now = Date.now();
+          if (!expirations.length || expirations[expirations.length - 1]!.at > now) return;
+          // Cards are ordered newest first, so only the tail can expire.
+          while (expirations.length && expirations[expirations.length - 1]!.at <= now)
+            expirations.pop()!.card.remove();
+          activity.completed.countRequests(activity.completed.list.childElementCount);
+        };
+      }
       lane.append(activity[state].list);
     }
     lane.append(list);
@@ -134,5 +152,8 @@ export function renderBoard(
   columns.prepend(...planning.sections);
   board.append(columns);
   root.replaceChildren(board);
-  return planning.refresh;
+  return (read: () => Promise<BoardRequest[]>) => {
+    pruneCompleted();
+    return planning.refresh(read);
+  };
 }
