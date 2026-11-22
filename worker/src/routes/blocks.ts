@@ -4,6 +4,8 @@ import { dataVersion, findBlocks } from "../db/repo";
 import { RFC3339 } from "../domain/ingest";
 
 const MAX_RANGE_MS = 31 * 86_400_000;
+// Bump when the response shape changes so browsers drop ETags of the old format.
+const RESPONSE_FORMAT = "v1";
 
 function parseTime(v: string | undefined): number | null {
   if (v === undefined || !RFC3339.test(v)) return null;
@@ -23,7 +25,7 @@ export function registerBlockRoutes(app: Hono<AppEnv>): void {
     }
 
     const version = await dataVersion(c.env.DB, principal.userId);
-    const etag = `"${version}"`;
+    const etag = `"${RESPONSE_FORMAT}-${version}"`;
     const headers = { ETag: etag, "Cache-Control": "private, no-cache" };
     const ifNoneMatch = c.req.header("If-None-Match");
     if (ifNoneMatch !== undefined && ifNoneMatch.split(",").some((t) => t.trim() === etag || t.trim() === `W/${etag}`)) {

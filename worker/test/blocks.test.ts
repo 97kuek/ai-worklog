@@ -46,7 +46,8 @@ it("returns_blocks_in_range_with_their_sessions", async () => {
   const res = await get(DAY);
   expect(res.status).toBe(200);
   expect(res.headers.get("Cache-Control")).toBe("private, no-cache");
-  expect(res.headers.get("ETag")).toBe(`"${NOW}"`);
+  expect(res.headers.get("ETag")).toBe(`"v1-${NOW}"`);
+  expect(res.headers.get("ETag")!.startsWith(`"v1-`)).toBe(true);
   const body = (await res.json()) as Body;
   expect(body.version).toBe(NOW);
   expect(body.blocks.map((b) => b.started_at)).toEqual([
@@ -114,7 +115,7 @@ it("changes_etag_after_new_data", async () => {
   await seed(changed, NOW + 1000);
   const res = await get(DAY, { "If-None-Match": etag });
   expect(res.status).toBe(200);
-  expect(res.headers.get("ETag")).toBe(`"${NOW + 1000}"`);
+  expect(res.headers.get("ETag")).toBe(`"v1-${NOW + 1000}"`);
   expect(res.headers.get("ETag")).not.toBe(etag);
 });
 
