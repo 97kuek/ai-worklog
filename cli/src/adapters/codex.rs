@@ -101,15 +101,18 @@ enum Role {
     Excluded,
 }
 
-/// Reads Codex sessions that have any activity file modified at or after
-/// `modified_since`. A parent and its subagent threads form one family that
+/// Reads Codex sessions (from `sessions/` and `archived_sessions/`) that
+/// have any file modified at or after `modified_since`. A parent and its subagent threads form one family that
 /// is read whole whenever any of its files is in the window, so the result
 /// for a session never depends on the window. Guardian review threads and
 /// subagents whose root session is missing are dropped.
 pub fn read_codex_sessions(codex_dir: &Path, modified_since: SystemTime) -> Vec<RawSession> {
     let titles = read_titles(&codex_dir.join("session_index.jsonl"));
+    // Archiving a conversation moves its rollout to archived_sessions/, and
+    // its work should stay on the calendar.
     let mut files = Vec::new();
     collect_jsonl(&codex_dir.join("sessions"), &mut files);
+    collect_jsonl(&codex_dir.join("archived_sessions"), &mut files);
 
     // Pass 1: read only each file's session_meta to learn the family tree.
     let headers: Vec<(PathBuf, String, Role)> = files
@@ -156,13 +159,15 @@ pub fn read_codex_sessions(codex_dir: &Path, modified_since: SystemTime) -> Vec<
             p.models.extend(child.models);
         }
     }
-    mains
+    let mut out: Vec<RawSession> = mains
         .into_values()
         .map(|mut m| {
             m.source_title = titles.get(&m.native_session_id).cloned();
             m
         })
-        .collect()
+        .collect();
+    out.sort_by(|a, b| a.native_session_id.cmp(&b.native_session_id));
+    out
 }
 
 fn read_header(path: &Path) -> Option<(String, Role)> {
@@ -351,6 +356,22 @@ mod tests {
         let all = ["rollout-a.jsonl", "rollout-b.jsonl", "rollout-c.jsonl", "rollout-d.jsonl"];
         let dir = fixture_with_stale("all-stale", &all);
         assert!(read_codex_sessions(&dir, one_day_ago()).is_empty());
+    }
+
+    #[test]
+    fn reads_archived_sessions() {
+        let dir = fixture_with_stale("archived", &[]);
+        std::fs::create_dir_all(dir.join("archived_sessions")).unwrap();
+        std::fs::write(
+            dir.join("archived_sessions/rollout-e.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-11-19T02:00:00.000Z","type":"session_meta","payload":{"id":"c5","cwd":"/tmp/old","originator":"Codex Desktop","thread_source":"user"}}"#, "\n",
+                r#"{"timestamp":"2026-11-19T02:00:05.000Z","type":"response_item","payload":{"type":"message","role":"user"}}"#, "\n",
+            ),
+        )
+        .unwrap();
+        let ids: Vec<String> = read_codex_sessions(&dir, SystemTime::UNIX_EPOCH).into_iter().map(|r| r.native_session_id).collect();
+        assert_eq!(ids, vec!["c1", "c5"]);
     }
 
     #[test]
