@@ -2,158 +2,183 @@ import { completedBoardWindow } from "./board-retention.js";
 import { planningLanes, type BoardRequest, type SaveRequest } from "./planning.js";
 import { countLabel, el, engineName, stateOf, statusLabel, titleOf, type Session } from "./shared.js";
 
-const lanes = ["running", "waiting", "completed"] as const;
+type BoardSession = Pick<Session, "id" | "tool" | "title" | "started_at" | "ended_at" | "observed_status" | "completed_at">;
+export interface BoardUpdates { sessions: BoardSession[]; requests: BoardRequest[] }
+
+const states = ["running", "waiting", "completed"] as const;
+type Lane = typeof states[number];
 const dateFormat = new Intl.DateTimeFormat("en-US", {
-  month: "short",
-  day: "numeric",
-  hour: "2-digit",
-  minute: "2-digit",
-  hourCycle: "h23",
+  month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
 });
 const pending = new WeakMap<HTMLElement, Map<string, Promise<void>>>();
 
-function updateTime(session: Session): string {
+function updateTime(session: BoardSession): string {
   return session.completed_at ?? session.observed_status?.at ?? session.ended_at;
 }
 
+function sessionLane(state: Lane) {
+  const section = el("section", "board-lane board-" + state);
+  const heading = el("h2", "board-lane-heading", statusLabel(state));
+  const count = el("span", "board-count");
+  const sessions = el("ul", "board-list");
+  const list = el("ul", "board-list board-launched");
+  heading.append(count);
+  if (state === "completed") heading.title = "Completed in the last 7 days";
+  section.append(heading);
+  if (state !== "waiting") section.append(list);
+  section.append(sessions);
+  function countRequests(n: number) {
+    const total = sessions.childElementCount + n;
+    if (count.textContent === String(total)) return;
+    count.textContent = String(total);
+    count.setAttribute("aria-label", countLabel(total, "task"));
+  }
+  return { section, list, sessions, countRequests };
+}
+
 export function renderBoard(
-  root: HTMLElement,
-  sessions: Session[],
-  open: (id: string) => void,
-  complete: (id: string) => Promise<void>,
-  plans: BoardRequest[],
-  save: SaveRequest,
-  runnerProjects: string[],
+  root: HTMLElement, sessions: Session[], open: (id: string) => void, complete: (id: string) => Promise<void>,
+  plans: BoardRequest[], save: SaveRequest, runnerProjects: string[],
 ) {
   const requests = pending.get(root) ?? new Map<string, Promise<void>>();
   pending.set(root, requests);
-  const sorted = [...sessions].sort(
-    (a, b) => Date.parse(updateTime(b)) - Date.parse(updateTime(a)) || a.id.localeCompare(b.id),
-  );
   const board = el("div", "worklog-board");
   const columns = el("div", "board-lanes");
-  function requestLane() {
-    return { list: el("ul", "board-list board-launched"), countRequests: (_count: number) => {} };
-  }
-  const activity = { running: requestLane(), completed: requestLane() };
+  const lanes = { running: sessionLane("running"), waiting: sessionLane("waiting"), completed: sessionLane("completed") };
   let dragged: (() => void) | undefined;
   function endDrag() {
     dragged = undefined;
     board.classList.remove("is-dragging");
   }
+  lanes.completed.section.ondragover = event => {
+    if (!dragged || !event.dataTransfer) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+  };
+  lanes.completed.section.ondrop = event => {
+    if (!dragged) return;
+    event.preventDefault();
+    dragged();
+    endDrag();
+  };
 
-  let pruneCompleted = () => {};
-  const cutoff = Date.now() - completedBoardWindow;
-  for (const state of lanes) {
-    const items = sorted.filter((session) => stateOf(session) === state &&
-      (state !== "completed" || Date.parse(updateTime(session)) > cutoff));
-    const lane = el("section", "board-lane board-" + state);
-    const heading = el("h2", "board-lane-heading", statusLabel(state));
-    const count = el("span", "board-count", String(items.length));
-    count.setAttribute("aria-label", countLabel(items.length, "task"));
-    heading.append(count);
-    lane.append(heading);
-    const list = el("ul", "board-list");
-    const expirations: { at: number; card: HTMLElement }[] = [];
-    for (const session of items) {
-      const card = el("li", "board-card");
-      if (state === "completed") expirations.push({ at: Date.parse(updateTime(session)) + completedBoardWindow, card });
+  function sessionCard(id: string) {
+    const card = el("li", "board-card");
+    const action = el("button", "board-title");
+    action.type = "button";
+    action.dataset.sessionId = id;
+    action.onclick = () => open(id);
+    const content = el("div", "board-content");
+    const meta = el("div", "board-meta");
+    const engine = el("span");
+    const time = el("time");
+    const error = el("p", "board-error");
+    error.setAttribute("role", "alert");
+    meta.append(engine, time);
+    content.append(action, meta, error);
+    card.append(content);
+    let waiting = false;
+    async function track(request: Promise<void>) {
+      card.draggable = false;
+      card.setAttribute("aria-busy", "true");
+      error.textContent = "";
+      try {
+        await request;
+      } catch (reason) {
+        error.textContent = reason instanceof Error ? reason.message : "Could not mark this task complete.";
+      } finally {
+        if (requests.get(id) === request) requests.delete(id);
+        card.draggable = waiting;
+        card.removeAttribute("aria-busy");
+      }
+    }
+    card.ondragstart = event => {
+      if (!waiting || !event.dataTransfer || requests.has(id)) return;
+      dragged = () => {
+        if (requests.has(id)) return;
+        const promise = Promise.resolve().then(() => complete(id));
+        requests.set(id, promise);
+        void track(promise);
+      };
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", action.textContent ?? "");
+      board.classList.add("is-dragging");
+    };
+    card.ondragend = endDrag;
+    const existing = requests.get(id);
+    if (existing) void track(existing);
+    function update(session: BoardSession, state: Lane) {
+      waiting = state === "waiting";
+      card.draggable = waiting && !requests.has(id);
       const title = titleOf(session);
-      const action = el("button", "board-title", title);
-      action.type = "button";
-      action.dataset.sessionId = session.id;
-      action.onclick = () => open(session.id);
-      const content = el("div", "board-content");
-      const meta = el("div", "board-meta");
-      const value = updateTime(session);
-      meta.append(el("span", "", engineName(session.tool)));
-      if (Number.isFinite(Date.parse(value))) {
-        const time = el("time", "", dateFormat.format(new Date(value)));
-        time.dateTime = value;
-        time.title = state === "completed" ? "Completed at" : "Status last observed";
-        meta.append(time);
+      if (action.textContent !== title) action.textContent = title;
+      const name = engineName(session.tool);
+      if (engine.textContent !== name) engine.textContent = name;
+      const stamp = updateTime(session);
+      if (time.dateTime !== stamp) {
+        time.dateTime = stamp;
+        time.hidden = !Number.isFinite(Date.parse(stamp));
+        time.textContent = time.hidden ? "" : dateFormat.format(new Date(stamp));
       }
-      content.append(action, meta);
-      if (state === "waiting") {
-        const error = el("p", "board-error");
-        error.setAttribute("role", "alert");
-        content.append(error);
-        async function track(request: Promise<void>) {
-          card.draggable = false;
-          card.setAttribute("aria-busy", "true");
-          error.textContent = "";
-          try {
-            await request;
-          } catch (reason) {
-            error.textContent = reason instanceof Error ? reason.message : "Could not mark this task complete.";
-          } finally {
-            if (requests.get(session.id) === request) requests.delete(session.id);
-            card.draggable = true;
-            card.removeAttribute("aria-busy");
-          }
-        }
-        const submit = () => {
-          if (requests.has(session.id)) return;
-          const request = Promise.resolve().then(() => complete(session.id));
-          requests.set(session.id, request);
-          void track(request);
-        };
-        card.draggable = true;
-        card.ondragstart = (event) => {
-          if (!event.dataTransfer || requests.has(session.id)) return;
-          dragged = submit;
-          event.dataTransfer.effectAllowed = "move";
-          event.dataTransfer.setData("text/plain", title);
-          board.classList.add("is-dragging");
-        };
-        card.ondragend = endDrag;
-        const existing = requests.get(session.id);
-        if (existing) void track(existing);
-      }
-      card.append(content);
-      list.append(card);
+      time.title = state === "completed" ? "Completed at" : "Status last observed";
+      if (!waiting) error.textContent = "";
     }
-    if (state !== "waiting") {
-      activity[state].countRequests = n => {
-        const total = list.childElementCount + n;
-        count.textContent = String(total);
-        count.setAttribute("aria-label", countLabel(total, "task"));
-      };
-      if (state === "completed") {
-        heading.title = "Completed in the last 7 days";
-        pruneCompleted = () => {
-          const now = Date.now();
-          if (!expirations.length || expirations[expirations.length - 1]!.at > now) return;
-          // Cards are ordered newest first, so only the tail can expire.
-          while (expirations.length && expirations[expirations.length - 1]!.at <= now)
-            expirations.pop()!.card.remove();
-          activity.completed.countRequests(activity.completed.list.childElementCount);
-        };
-      }
-      lane.append(activity[state].list);
-    }
-    lane.append(list);
-    if (state === "completed") {
-      lane.ondragover = (event) => {
-        if (!dragged || !event.dataTransfer) return;
-        event.preventDefault();
-        event.dataTransfer.dropEffect = "move";
-      };
-      lane.ondrop = (event) => {
-        if (!dragged) return;
-        event.preventDefault();
-        dragged();
-        endDrag();
-      };
-    }
-    columns.append(lane);
+    return { card, update };
   }
-  const planning = planningLanes(plans, save, sessions, activity, runnerProjects);
-  columns.prepend(...planning.sections);
+
+  const cards = new Map<string, ReturnType<typeof sessionCard>>();
+  let lastSessions: BoardSession[] = sessions;
+  let nextExpiry = Infinity;
+  function drawSessions(latest: BoardSession[]) {
+    lastSessions = latest;
+    nextExpiry = Infinity;
+    const focused = document.activeElement;
+    const cutoff = Date.now() - completedBoardWindow;
+    const visible = new Set<string>();
+    const ordered: Record<Lane, HTMLElement[]> = { running: [], waiting: [], completed: [] };
+    for (const session of [...latest].sort((a, b) => Date.parse(updateTime(b)) - Date.parse(updateTime(a)) || a.id.localeCompare(b.id))) {
+      const state = stateOf(session);
+      if (state !== "running" && state !== "waiting" && state !== "completed") continue;
+      if (state === "completed") {
+        const stamp = Date.parse(updateTime(session));
+        if (stamp <= cutoff) continue;
+        nextExpiry = Math.min(nextExpiry, stamp + completedBoardWindow);
+      }
+      visible.add(session.id);
+      const item = cards.get(session.id) ?? sessionCard(session.id);
+      cards.set(session.id, item);
+      item.update(session, state);
+      ordered[state].push(item.card);
+    }
+    for (const [id, item] of cards) {
+      if (visible.has(id)) continue;
+      item.card.remove();
+      cards.delete(id);
+    }
+    for (const state of states) {
+      const list = lanes[state].sessions;
+      ordered[state].forEach((card, i) => {
+        const at = list.children.item(i);
+        if (at !== card) list.insertBefore(card, at);
+      });
+    }
+    // Count after moves between lists so neither lane counts a departing card.
+    for (const lane of Object.values(lanes)) lane.countRequests(lane.list.childElementCount);
+    if (focused instanceof HTMLElement && board.contains(focused) && document.activeElement !== focused)
+      focused.focus({ preventScroll: true });
+  }
+  drawSessions(sessions);
+  const planning = planningLanes(plans, save, sessions, { running: lanes.running, completed: lanes.completed }, runnerProjects);
+  columns.append(...planning.sections, ...states.map(state => lanes[state].section));
   board.append(columns);
   root.replaceChildren(board);
-  return (read: () => Promise<BoardRequest[]>) => {
-    pruneCompleted();
-    return planning.refresh(read);
+  return async (read: () => Promise<BoardUpdates>) => {
+    if (!dragged && Date.now() >= nextExpiry) drawSessions(lastSessions);
+    const snapshot = read();
+    // Keep the planning mutation guard active across the network request.
+    await Promise.all([
+      planning.refresh(async () => (await snapshot).requests),
+      snapshot.then(data => { if (!dragged) drawSessions(data.sessions); }),
+    ]);
   };
 }
