@@ -36,7 +36,7 @@ Your Mac(s)                                   Your Cloudflare account
 | Directory | What | Language |
 |---|---|---|
 | `cli/` | Collector, status line wrapper, and hooks that run on each Mac | Rust |
-| `cloud/` | API and calendar UI deployed as a single Cloudflare Worker | TypeScript |
+| `worker/` | Cloudflare Worker serving the API and static calendar UI, backed by D1 | TypeScript |
 
 Both directories will be added as implementation progresses.
 
