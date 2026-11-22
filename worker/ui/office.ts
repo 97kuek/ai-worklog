@@ -1,4 +1,4 @@
-import { el, engineName, modelSettings, stateOf, titleOf, type Session } from "./shared.js";
+import { el, engineName, modelSettings, titleOf, type Session } from "./shared.js";
 import type { OfficeScene } from "./office-scene.js";
 
 const desksPerRoom = 3;
@@ -14,7 +14,8 @@ function button(label: string, className: string, text: string) {
 
 // A running task stays with the same employee, even when another room goes on break.
 export function assignDesks(previous: Map<string, number>, sessions: Session[]) {
-  const running = sessions.filter(session => stateOf(session) === "running");
+  const running = sessions.filter(session => session.observed_status?.state === "running" &&
+    (!session.completed_at || Date.parse(session.observed_status.at) > Date.parse(session.completed_at)));
   const seats = new Map<string, number>();
   const taken = new Set<number>();
   for (const { id } of running) {
