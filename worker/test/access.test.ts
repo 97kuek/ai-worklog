@@ -87,6 +87,26 @@ describe("createAccessAuthenticator", () => {
     expect(await auth(req(token), env)).toBeNull();
   });
 
+  it("accepts_a_token_signed_with_a_rotated_key", async () => {
+    const oldKp = await makeKeyPair("old");
+    const newKp = await makeKeyPair("new");
+    const getKeys = vi.fn(async (_d: string, opts?: { refresh?: boolean }) =>
+      opts?.refresh ? [oldKp.publicJwk, newKp.publicJwk] : [oldKp.publicJwk],
+    );
+    const auth = createAccessAuthenticator(getKeys);
+    const token = await newKp.sign(accessClaims({ email: "owner@example.com" }));
+    expect(await auth(req(token), env)).toEqual({ kind: "user", email: "owner@example.com" });
+    const refreshCalls = getKeys.mock.calls.filter(([, o]) => o?.refresh);
+    expect(refreshCalls).toEqual([["test-team.cloudflareaccess.com", { refresh: true }]]);
+  });
+
+  it("does_not_refetch_for_a_malformed_token", async () => {
+    const getKeys = vi.fn(async () => []);
+    const auth = createAccessAuthenticator(getKeys);
+    expect(await auth(req("not-a-jwt"), env)).toBeNull();
+    expect(getKeys).not.toHaveBeenCalled();
+  });
+
   it("rejects_token_without_identity", async () => {
     const kp = await makeKeyPair("k1");
     const auth = createAccessAuthenticator(async () => [kp.publicJwk]);
@@ -137,6 +157,25 @@ describe("fetchAccessKeys", () => {
     expect(await fetchAccessKeys(domain)).toEqual([kp.publicJwk]);
     expect(spy).toHaveBeenCalledTimes(1);
     expect(String(spy.mock.calls[0]![0])).toBe(`https://${domain}/cdn-cgi/access/certs`);
+  });
+
+  it("refresh_refetches_but_at_most_once_per_minute", async () => {
+    const kp = await makeKeyPair("k1");
+    const spy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => Response.json({ keys: [kp.publicJwk] }));
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+    const domain = "test-team.cloudflareaccess.com";
+    await fetchAccessKeys(domain);
+    expect(spy).toHaveBeenCalledTimes(1);
+    await fetchAccessKeys(domain, { refresh: true });
+    expect(spy).toHaveBeenCalledTimes(2);
+    now.mockReturnValue(1_000_000 + 30_000);
+    await fetchAccessKeys(domain, { refresh: true });
+    expect(spy).toHaveBeenCalledTimes(2);
+    now.mockReturnValue(1_000_000 + 61_000);
+    await fetchAccessKeys(domain, { refresh: true });
+    expect(spy).toHaveBeenCalledTimes(3);
   });
 
   it("throws_and_does_not_cache_on_non_200", async () => {
