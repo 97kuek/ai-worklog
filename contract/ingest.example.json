@@ -1,0 +1,43 @@
+{
+  "machine_name": "example-mac",
+  "sessions": [
+    {
+      "tool": "claude_code",
+      "native_session_id": "example-claude-1",
+      "title": "見本の作業",
+      "project": "demo",
+      "cwd": "/tmp/demo",
+      "git_branch": "main",
+      "models": ["claude-opus-5-5"],
+      "invoked_by": null,
+      "started_at": "2026-11-20T01:00:00.000Z",
+      "ended_at": "2026-11-20T02:10:00.000Z",
+      "active_minutes": 30.0,
+      "tokens": { "input": 120, "output": 80, "cache_read": 1000, "cache_write": 200 },
+      "blocks": [
+        { "seq": 0, "started_at": "2026-11-20T01:00:00.000Z", "ended_at": "2026-11-20T01:20:00.000Z", "message_count": 6,
+          "tokens": { "input": 100, "output": 60, "cache_read": 800, "cache_write": 200 } },
+        { "seq": 1, "started_at": "2026-11-20T02:00:00.000Z", "ended_at": "2026-11-20T02:10:00.000Z", "message_count": 3,
+          "tokens": { "input": 20, "output": 20, "cache_read": 200, "cache_write": 0 } }
+      ]
+    },
+    {
+      "tool": "codex",
+      "native_session_id": "example-codex-1",
+      "title": null,
+      "project": "demo",
+      "cwd": "/tmp/demo",
+      "git_branch": null,
+      "models": ["gpt-5.5"],
+      "invoked_by": "claude_code",
+      "started_at": "2026-11-20T01:05:00.000Z",
+      "ended_at": "2026-11-20T01:05:00.000Z",
+      "active_minutes": 0.0,
+      "tokens": { "input": 10, "output": 5, "cache_read": 0, "cache_write": 0 },
+      "blocks": [
+        { "seq": 0, "started_at": "2026-11-20T01:05:00.000Z", "ended_at": "2026-11-20T01:05:00.000Z", "message_count": 1,
+          "tokens": { "input": 10, "output": 5, "cache_read": 0, "cache_write": 0 } }
+      ]
+    }
+  ]
+}
