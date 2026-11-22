@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { ConfigError, type Authenticate } from "./auth/identity";
 import { ensureMachine, ensureUser } from "./db/repo";
+import { registerSessionRoutes } from "./routes/sessions";
 
 export type Principal =
   | { kind: "user"; userId: string }
@@ -38,6 +39,8 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
     const p = c.get("principal");
     return c.json(p.kind === "user" ? { kind: "user" } : { kind: "machine", machine_id: p.machineId });
   });
+
+  registerSessionRoutes(app, now);
 
   app.onError((err, c) => {
     if (err instanceof ConfigError) {
