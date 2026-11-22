@@ -11,10 +11,10 @@ use crate::adapters::claude::{list_claude_files, merge_claude, read_claude_file,
 use crate::adapters::codex::{list_codex_files, merge_codex, read_codex_file, read_thread_titles, CodexFileState, CodexRole};
 use crate::adapters::http::{SendError, Sender};
 use crate::adapters::jsonl::{stat, FileId};
-use crate::adapters::namer::{build_material, Namer};
+use crate::adapters::namer::{build_material, NameOutcome, Namer};
 use crate::domain::{build_session, Millis, Session};
 
-/// これだけ名付けに失敗したら、それ以降は試さない
+/// 使えない出力がこれだけ続いたら、それ以降は試さない
 const MAX_NAME_ATTEMPTS: u8 = 2;
 /// エラーに残す、拒否されたときの応答の error / path の長さ
 const MAX_ERROR_FIELD_CHARS: usize = 200;
@@ -303,10 +303,15 @@ fn name_sessions(namer: &dyn Namer, rule: &NamingRule, state: &mut State, built:
             continue;
         }
         tried += 1;
-        entry.name_attempts += 1;
-        if let Some(title) = namer.name(&material) {
-            entry.title = Some(title);
-            report.names_assigned += 1;
+        match namer.name(&material) {
+            NameOutcome::Named(title) => {
+                entry.name_attempts += 1;
+                entry.title = Some(title);
+                report.names_assigned += 1;
+            }
+            NameOutcome::Unusable => entry.name_attempts += 1,
+            // claude 側の問題。回数に数えず、この回はもう試さない
+            NameOutcome::Unavailable => break,
         }
     }
 }
@@ -579,22 +584,26 @@ mod tests {
     }
 
     struct FakeNamer {
-        name: Option<String>,
+        outcome: NameOutcome,
         calls: Cell<usize>,
         materials: RefCell<Vec<String>>,
     }
 
     impl FakeNamer {
+        /// Some なら名付け、None なら使えない出力
         fn new(name: Option<&str>) -> FakeNamer {
-            FakeNamer { name: name.map(str::to_owned), calls: Cell::new(0), materials: RefCell::new(vec![]) }
+            FakeNamer::with(name.map_or(NameOutcome::Unusable, |n| NameOutcome::Named(n.to_owned())))
+        }
+        fn with(outcome: NameOutcome) -> FakeNamer {
+            FakeNamer { outcome, calls: Cell::new(0), materials: RefCell::new(vec![]) }
         }
     }
 
     impl Namer for FakeNamer {
-        fn name(&self, material: &str) -> Option<String> {
+        fn name(&self, material: &str) -> NameOutcome {
             self.calls.set(self.calls.get() + 1);
             self.materials.borrow_mut().push(material.to_owned());
-            self.name.clone()
+            self.outcome.clone()
         }
     }
 
@@ -886,6 +895,35 @@ mod tests {
         assert!(user_texts_of(&st, "s2").is_empty());
         // 名前が付かないままなので、送り直さない
         assert_eq!(sender.calls(), 1);
+    }
+
+    #[test]
+    fn unavailable_namer_does_not_use_attempts() {
+        let env = Env::new("naming_unavailable");
+        let namer = FakeNamer::with(NameOutcome::Unavailable);
+        let opts = env.opts(ts("2026-11-22T00:00:00.000Z"), Some((&namer, 1, 10)), ChunkLimits { ..DEFAULT_CHUNK });
+        let sender = FakeSender::ok();
+        let mut st = State::default();
+
+        // 1回失敗したら、その回は残りを試さない
+        for run in 1..=4 {
+            let report = collect(&opts, &mut st, &sender);
+            assert_eq!(namer.calls.get(), run, "run {run}");
+            assert_eq!(report.names_assigned, 0);
+        }
+        for key in ["claude_code:s1", "codex:c1", "claude_code:s2"] {
+            assert_eq!(st.sessions.get(key).map_or(0, |s| s.name_attempts), 0, "{key}");
+        }
+        // 材料は次の回のために残す
+        assert!(!user_texts_of(&st, "s1").is_empty());
+        assert_eq!(user_texts_of(&st, "s2"), ["x"]);
+
+        // claude が使えるようになったら名付ける
+        let namer = FakeNamer::new(Some("デモの改修"));
+        let opts = env.opts(ts("2026-11-22T00:00:00.000Z"), Some((&namer, 1, 10)), ChunkLimits { ..DEFAULT_CHUNK });
+        let report = collect(&opts, &mut st, &sender);
+        assert_eq!(report.names_assigned, 3);
+        assert!(user_texts_of(&st, "s1").is_empty());
     }
 
     #[test]
