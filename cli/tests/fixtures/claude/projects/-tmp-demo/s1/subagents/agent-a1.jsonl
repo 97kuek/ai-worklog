@@ -1,0 +1,2 @@
+{"type":"user","isSidechain":true,"timestamp":"2026-11-20T01:20:00.000Z","sessionId":"s1","message":{"role":"user","content":"task"}}
+{"type":"assistant","isSidechain":true,"timestamp":"2026-11-20T01:40:00.000Z","sessionId":"s1","requestId":"r9","message":{"id":"m9","model":"claude-haiku-5-5","usage":{"input_tokens":3,"output_tokens":2,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
