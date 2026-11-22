@@ -78,9 +78,18 @@ cargo build --release
 
 Keep the CLI lightweight: avoid async runtimes and heavy dependencies unless there is a clear need.
 
-### Cloud (`cloud/`)
+### Worker (`worker/`)
 
-Setup instructions will be added together with the Cloudflare Worker.
+Requirements: Node (managed by [Volta](https://volta.sh/); the version is pinned in `worker/package.json`).
+
+```bash
+cd worker
+npm ci
+npm test            # runs Vitest inside the Workers runtime
+npm run typecheck
+```
+
+To run the Worker locally, copy `.dev.vars.example` to `.dev.vars` and fill in the values. `.dev.vars` is ignored by Git.
 
 ## Privacy
 

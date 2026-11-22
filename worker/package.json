@@ -1,0 +1,25 @@
+{
+  "name": "ai-worklog-worker",
+  "version": "1.0.0",
+  "description": "ai-worklog Cloudflare Worker",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "types": "wrangler types",
+    "deploy": "wrangler d1 migrations apply DB --remote && wrangler deploy"
+  },
+  "type": "module",
+  "dependencies": {
+    "hono": "4.13.19"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.9",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.1",
+    "wrangler": "^4.166.0"
+  },
+  "volta": {
+    "node": "26.13.1"
+  },
+  "private": true
+}
