@@ -1,3 +1,4 @@
+import { filterMenu } from "./filter-menu.js";
 import {
   addDays,
   statusText,
@@ -82,21 +83,12 @@ export function renderLog(
     const heading = el("div", "results-heading");
     heading.append(el("h2", "", "Work blocks"), el("span", "count", String(rows.length)));
     const options = el("div", "filters");
-    const status = el("select");
-    status.id = "status-filter";
-    status.setAttribute("aria-label", "Filter by status");
-    for (const [value, name] of [["", "All statuses"], ...Object.entries(labels)]) {
-      const opt = el("option", "", name);
-      opt.value = value!;
-      status.append(opt);
-    }
-    status.value = filters.status;
-    status.toggleAttribute("data-active", Boolean(filters.status));
-    status.onchange = () => {
-      filters.status = status.value;
-      draw(status.id);
-    };
-    options.append(status);
+    const status = filterMenu("status-filter", "Filter by status", [["", "All statuses"], ...Object.entries(labels)],
+      filters.status, value => {
+        filters.status = value;
+        draw("status-filter");
+      });
+    options.append(status.root);
     tools.append(heading, options);
     panel.append(tools);
     const table = el("table", "log-table");
@@ -121,24 +113,24 @@ export function renderLog(
     dateHead.scope = "col";
     dateHead.setAttribute("aria-sort", filters.newest ? "descending" : "ascending");
     dateHead.append(sort);
-    header.append(dateHead);
-    for (const text of ["Status", "Task", "Engine", "Project"]) {
+    for (const text of ["Task", "Status", "Project", "Engine"]) {
       const th = el("th", "", text);
       th.scope = "col";
       header.append(th);
     }
+    header.append(dateHead);
     const tbody = table.createTBody();
     for (const b of rows) {
       const s = sessions.get(b.session_id)!;
       const row = tbody.insertRow();
       row.dataset.state = stateOf(s);
-      row.insertCell().append(blockTimeRange(b));
-      row.insertCell().append(statusText(s));
       const action = el("button", "task-link", titleOf(s));
       action.onclick = () => open(s.id, b);
       row.insertCell().append(action);
-      row.insertCell().textContent = engineName(s.tool);
+      row.insertCell().append(statusText(s));
       row.insertCell().textContent = s.project || "—";
+      row.insertCell().textContent = engineName(s.tool);
+      row.insertCell().append(blockTimeRange(b));
     }
     const scroll = el("div", "log-table-scroll");
     scroll.append(table);

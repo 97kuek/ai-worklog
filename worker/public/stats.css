@@ -207,3 +207,11 @@
     min-height: 44px;
   }
 }
+
+@media (max-width: 600px) {
+  .stats-table:not(.project-table) { min-width: 0; table-layout: fixed; }
+  .stats-table:not(.project-table) :is(th, td) { padding-inline: 4px; }
+  .stats-table:not(.project-table) th:first-child { width: 27%; }
+  .stats-table:not(.project-table) th:nth-child(2) { width: 33%; }
+  .stats-table:not(.project-table) th:last-child { width: 3.25rem; }
+}
