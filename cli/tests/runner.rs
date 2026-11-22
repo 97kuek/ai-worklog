@@ -136,7 +136,7 @@ fn retries_only_delivery_after_provider_exit() {
         calls[0],
         (
             "/api/runner/claim".into(),
-            json!({"engines":["claude_code","codex"],"projects":["demo"]})
+            json!({"engines":["claude_code","codex"],"projects":["demo"],"auto_queue":true})
         )
     );
     assert_eq!(calls[1].1["state"], "running");

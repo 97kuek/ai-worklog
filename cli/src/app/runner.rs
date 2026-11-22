@@ -282,6 +282,7 @@ pub fn poll(home: &Path) -> Result<()> {
             let body = serde_json::json!({
                 "projects": settings.projects.keys().collect::<Vec<_>>(),
                 "engines": settings.executables.keys().collect::<Vec<_>>(),
+                "auto_queue": true,
             });
             let claim: Claim = sender
                 .put("runner/claim", &body.to_string())
