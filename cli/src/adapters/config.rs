@@ -57,6 +57,13 @@ pub fn home_dir() -> PathBuf {
     })
 }
 
+pub fn is_default_claude_profile(dir: &Path) -> bool {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .and_then(|home| home.join(".claude").canonicalize().ok())
+        .is_some_and(|default| dir.canonicalize().ok().as_ref() == Some(&default))
+}
+
 pub fn api_endpoint(url: &str) -> Result<ureq::http::Uri, &'static str> {
     let uri = url.parse::<ureq::http::Uri>().map_err(|_| "invalid API URL")?;
     let authority = uri.authority().ok_or("API URL needs a host")?;

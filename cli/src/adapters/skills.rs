@@ -17,20 +17,29 @@ pub struct Skill {
     pub description: String,
 }
 
-pub const TOOLS: [(Tool, &str); 2] = [(Tool::ClaudeCode, "claude_code"), (Tool::Codex, "codex")];
-
 type Result<T> = std::result::Result<T, &'static str>;
 
 const INVALID: &str = "invalid skill inventory response";
 const LIMIT: u64 = 16 * 1024 * 1024;
 
-pub fn discover(tool: Tool, cwd: &Path) -> Result<Vec<Skill>> {
+pub fn discover(tool: Tool, cwd: &Path, claude_dir: Option<&Path>) -> Result<Vec<Skill>> {
     let cwd = cwd
         .canonicalize()
         .map_err(|_| "inventory working directory unavailable")?;
     let mut cmd = match tool {
         Tool::ClaudeCode => {
             let mut cmd = Command::new("claude");
+            if let Some(dir) = claude_dir {
+                // Never launch Claude against a vanished directory and upload an empty replacement.
+                if !dir.is_dir() {
+                    return Err("Claude profile directory unavailable");
+                }
+                if super::config::is_default_claude_profile(dir) {
+                    cmd.env_remove("CLAUDE_CONFIG_DIR");
+                } else {
+                    cmd.env("CLAUDE_CONFIG_DIR", dir);
+                }
+            }
             cmd.args([
                 "-p",
                 "--input-format",

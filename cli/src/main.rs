@@ -15,10 +15,12 @@ use taskfolio::app::setup::{self, append_log_line};
 use taskfolio::app::output::{to_json, to_table};
 use taskfolio::app::scan::{scan, ScanOptions};
 
-const USAGE: &str = "usage: taskfolio <scan|skills|collect|runner|folder|login|setup|hook|hook-status|doctor|--version>
+const USAGE: &str = "usage: taskfolio <scan|skills|collect|sync-usage|claude-statusline|runner|folder|login|setup|hook|hook-status|doctor|--version>
   scan [--since-days N] [--gap-minutes N] [--format json|table] [--claude-dir PATH] [--codex-dir PATH]
   skills [--cwd PATH]
   collect [--rescan]
+  sync-usage
+  claude-statusline [--render COMMAND]
   runner
   folder add [--path DIR] [--name KEY]
   login --url API_URL --machine-name NAME --client-id ID [--expires YYYY-MM-DD]
@@ -54,16 +56,13 @@ fn main() -> ExitCode {
                 },
                 _ => return usage_error(),
             };
-            let mut skills = Vec::new();
-            for (tool, name) in taskfolio::adapters::skills::TOOLS {
-                match taskfolio::adapters::skills::discover(tool, &cwd) {
-                    Ok(rows) => skills.extend(rows),
-                    Err(reason) => {
-                        eprintln!("taskfolio: {name} skills: {reason}");
-                        return ExitCode::FAILURE;
-                    }
+            let skills = match taskfolio::app::skills::list(&config::home_dir(), &cwd) {
+                Ok(skills) => skills,
+                Err(reason) => {
+                    eprintln!("taskfolio: {reason}");
+                    return ExitCode::FAILURE;
                 }
-            }
+            };
             println!("{}", serde_json::json!({"skills":skills}));
             ExitCode::SUCCESS
         }
@@ -76,8 +75,13 @@ fn main() -> ExitCode {
                 }
                 _ => return usage_error(),
             };
-            run_collect(rescan)
+            run_collect(rescan, false)
         }
+        Ok(Some(lexopt::Arg::Value(cmd))) if cmd == "sync-usage" => {
+            if !matches!(parser.next(), Ok(None)) { return usage_error(); }
+            run_collect(false, true)
+        }
+        Ok(Some(lexopt::Arg::Value(cmd))) if cmd == "claude-statusline" => run_claude_statusline(parser),
         Ok(Some(lexopt::Arg::Value(cmd))) if cmd == "runner" => {
             if !matches!(parser.next(), Ok(None)) { return usage_error(); }
             match taskfolio::app::runner::poll(&config::home_dir()) {
@@ -136,13 +140,48 @@ fn user_home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
 }
 
-fn run_collect(rescan: bool) -> ExitCode {
+fn run_claude_statusline(mut parser: lexopt::Parser) -> ExitCode {
+    use lexopt::ValueExt;
+    use std::io::{Read, Write};
+    let render = match parser.next() {
+        Ok(Some(lexopt::Arg::Long("render"))) => match parser.value().and_then(|v| v.string()) {
+            Ok(command) if matches!(parser.next(), Ok(None)) => Some(command),
+            _ => return usage_error(),
+        },
+        Ok(None) => None,
+        _ => return usage_error(),
+    };
+    let observed_at = now_ms();
+    let mut input = Vec::new();
+    if std::io::stdin().read_to_end(&mut input).is_err() { return ExitCode::FAILURE; }
+    let active = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|s| !s.is_empty())
+        .map(PathBuf::from).unwrap_or_else(|| user_home().join(".claude"));
+    if taskfolio::app::claude_usage::capture(&config::home_dir(), &active, &input, observed_at).is_err() {
+        eprintln!("taskfolio: could not save Claude usage observation");
+    }
+    if let Some(command) = render {
+        let shell = std::env::var_os("SHELL").unwrap_or_else(|| "/bin/sh".into());
+        if let Ok(mut child) = Command::new(shell).arg("-c").arg(command).stdin(Stdio::piped()).spawn() {
+            if let Some(mut stdin) = child.stdin.take() { let _ = stdin.write_all(&input); }
+            if let Ok(status) = child.wait() { return ExitCode::from(status.code().unwrap_or(1) as u8); }
+        }
+        return ExitCode::FAILURE;
+    }
+    #[derive(serde::Deserialize)]
+    struct Display { model: Model }
+    #[derive(serde::Deserialize)]
+    struct Model { display_name: String }
+    if let Ok(display) = serde_json::from_slice::<Display>(&input) { println!("{}", display.model.display_name); }
+    ExitCode::SUCCESS
+}
+
+fn run_collect(rescan: bool, usage_only: bool) -> ExitCode {
     let home = config::home_dir();
     let _lock = match acquire_lock(&home) {
         Ok(Some(l)) => l,
         Ok(None) => {
             eprintln!("taskfolio: another collect is running");
-            return if rescan { ExitCode::FAILURE } else { ExitCode::SUCCESS };
+            return if rescan || usage_only { ExitCode::FAILURE } else { ExitCode::SUCCESS };
         }
         Err(e) => {
             eprintln!("taskfolio: cannot take lock in {}: {e}", home.display());
@@ -170,6 +209,12 @@ fn run_collect(rescan: bool) -> ExitCode {
         client_secret: secret,
         timeout: Duration::from_secs(30),
     };
+    if usage_only {
+        return match taskfolio::app::claude_usage::sync(&home, &sender) {
+            Ok(n) => { println!("Uploaded {n} Claude usage snapshots"); ExitCode::SUCCESS }
+            Err(e) => { eprintln!("taskfolio: Claude usage: {e}"); ExitCode::FAILURE }
+        };
+    }
     let namer = ClaudeCliNamer {
         command: cfg.naming.command.clone(),
         model: cfg.naming.model.clone(),
@@ -196,6 +241,9 @@ fn run_collect(rescan: bool) -> ExitCode {
     let skills_cwd = cfg.skills_cwd.as_deref().unwrap_or(&user);
     taskfolio::app::skills::sync(&home, skills_cwd, opts.now, &sender, &mut report);
 
+    if !report.auth_failed && let Err(e) = taskfolio::app::claude_usage::sync(&home, &sender) {
+        report.errors.push(format!("Claude usage: {e}"));
+    }
     let log_path = home.join("logs").join("collect.log");
     let mut line = serde_json::to_value(&report).unwrap_or_default();
     line["at"] = opts.now.into();

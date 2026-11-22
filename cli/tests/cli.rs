@@ -168,6 +168,13 @@ fn status_hook_persists_only_observations_and_coalesces_collection_requests() {
 fn skills_queries_installed_plugins_before_the_workspace_snapshot() {
     use std::os::unix::fs::PermissionsExt;
     let home = temp_dir("skills-protocol");
+    let personal = home.join(".claude");
+    let work = home.join("work");
+    std::fs::create_dir(&personal).unwrap();
+    std::fs::create_dir(&work).unwrap();
+    std::fs::write(home.join("claude-usage-profiles.json"), serde_json::json!({
+        "group-a": personal, "other_42": work,
+    }).to_string()).unwrap();
     let claude = home.join("claude");
     let codex = home.join("codex");
     std::fs::write(&claude, r#"#!/bin/sh
@@ -176,7 +183,12 @@ case "$req" in *initialize*) ;; *) exit 2;; esac
 echo '{"type":"control_response","response":{"subtype":"success","request_id":"init","response":{}}}'
 read -r req || exit 1
 case "$req" in *get_skills_dialog*) ;; *) exit 3;; esac
-echo '{"type":"control_response","response":{"subtype":"success","request_id":"skills","response":{"skills":[]}}}'
+case "$CLAUDE_CONFIG_DIR" in
+  "") skill=personal-skill;;
+  "$TASKFOLIO_HOME/work") skill=work-skill;;
+  *) exit 4;;
+esac
+printf '{"type":"control_response","response":{"subtype":"success","request_id":"skills","response":{"skills":[{"name":"%s","description":"","state":"on"}]}}}\n' "$skill"
 "#).unwrap();
     std::fs::write(&codex, r#"#!/bin/sh
 read -r req || exit 1
@@ -199,10 +211,14 @@ echo '{"id":3,"result":{"data":[{"errors":[],"skills":[{"enabled":true,"name":"r
     for p in [claude, codex] {
         std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
-    let output = bin().arg("skills").arg("--cwd").arg(&home).env("PATH", &home).output().unwrap();
+    let output = bin().arg("skills").arg("--cwd").arg(&home).env("TASKFOLIO_HOME", &home).env("HOME", &home).env("CLAUDE_CONFIG_DIR", &work).env("PATH", &home).output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(), serde_json::json!({
-        "skills":[{"tool":"codex","name":"remote:a","description":"example"}]
+        "skills":[
+            {"tool":"claude_code","account":"group-a","name":"personal-skill","description":""},
+            {"tool":"claude_code","account":"other_42","name":"work-skill","description":""},
+            {"tool":"codex","name":"remote:a","description":"example"},
+        ]
     }));
     let _ = std::fs::remove_dir_all(&home);
 }
