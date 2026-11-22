@@ -149,7 +149,9 @@ fn read_new_lines(opts: &CollectOptions, state: &mut State, report: &mut Collect
         let st = match stat(&path) {
             Ok(st) => st,
             Err(e) => {
+                // 一時的な失敗かもしれない。前回の途中結果は残し、今回は読まない
                 report.errors.push(format!("cannot stat {}: {e}", path.display()));
+                present.extend(previous.get(&path).cloned());
                 continue;
             }
         };
@@ -182,8 +184,45 @@ fn read_new_lines(opts: &CollectOptions, state: &mut State, report: &mut Collect
             Err(e) => report.errors.push(format!("cannot read {}: {e}", entry.path.display())),
         }
     }
-    // 消えたファイルの途中結果は持ち続けない
-    state.files.retain(|k, _| present.contains(k));
+    // 消えたファイルの途中結果は、同じセッション（Codex は同じ親子の系統）の
+    // ファイルが1つでも残っている間は、読まずに残してまとめに使う。
+    // 捨てると小さくなったセッションを送り、クラウドの正しい記録を上書きしてしまう
+    let groups = file_groups(&state.files);
+    let live: HashSet<&String> = present.iter().filter_map(|k| groups.get(k)).collect();
+    let keep: HashSet<String> =
+        state.files.keys().filter(|k| present.contains(*k) || groups.get(*k).is_some_and(|g| live.contains(g))).cloned().collect();
+    state.files.retain(|k, _| keep.contains(k));
+}
+
+/// ファイルのキー → そのファイルが属するまとまり。Claude は session_id、
+/// Codex は親をたどれるところまでたどった系統（消えたファイルも含めてたどる）
+fn file_groups(files: &BTreeMap<String, FileEntry>) -> HashMap<String, String> {
+    let roles: HashMap<&str, &CodexRole> = files
+        .values()
+        .filter_map(|e| e.codex.as_ref())
+        .filter_map(|st| Some((st.thread_id.as_deref()?, st.role.as_ref()?)))
+        .collect();
+    let family = |id: &str| {
+        let mut cur = id;
+        for _ in 0..32 {
+            match roles.get(cur) {
+                Some(CodexRole::Subagent { parent }) if roles.contains_key(parent.as_str()) => cur = parent,
+                _ => break,
+            }
+        }
+        format!("codex:{cur}")
+    };
+    files
+        .iter()
+        .map(|(k, e)| {
+            let group = match (&e.claude, e.codex.as_ref().and_then(|st| st.thread_id.as_deref())) {
+                (Some((id, _, _)), _) => format!("claude_code:{id}"),
+                (None, Some(thread)) => family(thread),
+                (None, None) => format!("file:{k}"),
+            };
+            (k.clone(), group)
+        })
+        .collect()
 }
 
 struct Built {
@@ -291,16 +330,23 @@ fn forget_user_texts(state: &mut State) {
 
 /// 送った内容から変わったセッションを小分けにして送る。成功した小分けだけ送った印を付ける
 fn send_changed(opts: &CollectOptions, state: &mut State, built: &[Built], sender: &dyn Sender, report: &mut CollectReport) {
-    let targets: Vec<(&Built, Option<String>, u64)> = built
-        .iter()
-        .filter_map(|b| {
-            let entry = state.sessions.get(&b.key);
-            let title = entry.and_then(|e| e.title.clone());
-            let fp = session_fingerprint(&Outgoing { session: &b.session, title: title.as_deref() });
-            (entry.and_then(|e| e.sent_fingerprint) != Some(fp)).then_some((b, title, fp))
-        })
-        .collect();
-    report.sessions_changed = targets.len();
+    let mut targets: Vec<(&Built, Option<String>, u64)> = Vec::new();
+    for b in built {
+        let entry = state.sessions.get(&b.key);
+        let title = entry.and_then(|e| e.title.clone());
+        let fp = session_fingerprint(&Outgoing { session: &b.session, title: title.as_deref() });
+        if entry.and_then(|e| e.sent_fingerprint) == Some(fp) {
+            continue;
+        }
+        report.sessions_changed += 1;
+        // 送ったものより小さくなったら送らない（APIは送られた内容で置き換える）
+        let (messages, tokens) = totals(&b.session);
+        if entry.is_some_and(|e| messages < e.sent_messages || tokens < e.sent_tokens) {
+            report.errors.push(format!("skipped shrinking session {}", b.key));
+            continue;
+        }
+        targets.push((b, title, fp));
+    }
 
     let blocks: Vec<usize> = targets.iter().map(|(b, _, _)| b.session.blocks.len()).collect();
     for range in chunk(&blocks, &opts.chunk) {
@@ -310,7 +356,9 @@ fn send_changed(opts: &CollectOptions, state: &mut State, built: &[Built], sende
         match sender.send(&to_ingest_json(&opts.machine_name, &items)) {
             Ok(_) => {
                 for (b, _, fp) in part {
-                    state.sessions.entry(b.key.clone()).or_default().sent_fingerprint = Some(*fp);
+                    let entry = state.sessions.entry(b.key.clone()).or_default();
+                    entry.sent_fingerprint = Some(*fp);
+                    (entry.sent_messages, entry.sent_tokens) = totals(&b.session);
                 }
                 report.sessions_sent += part.len();
             }
@@ -325,6 +373,13 @@ fn send_changed(opts: &CollectOptions, state: &mut State, built: &[Built], sende
             }
         }
     }
+}
+
+/// (ブロックの message_count の合計, 4種のトークンの合計)
+fn totals(s: &Session) -> (u64, u64) {
+    let messages = s.blocks.iter().map(|b| u64::from(b.message_count)).sum();
+    let t = s.tokens;
+    (messages, t.input + t.output + t.cache_read + t.cache_write)
 }
 
 fn describe(e: &SendError, sessions: usize) -> String {
@@ -751,12 +806,123 @@ mod tests {
         std::fs::write(env.s1(), &short).unwrap();
         let report = collect(&env.plain(), &mut st, &sender);
         assert_eq!(report.bytes_read, short.len() as u64);
-        assert_eq!(sender.ids(calls), ["s1"]);
+        // 送ったものより小さくなったので、送らずに知らせる
+        assert_eq!(sender.calls(), calls);
+        assert_eq!(report.errors, ["skipped shrinking session claude_code:s1"]);
 
-        // 何も読んでいない状態から全部読んだときと同じ
-        let fresh = FakeSender::ok();
-        collect(&env.plain(), &mut State::default(), &fresh);
-        assert_eq!(session(&sender.sessions(calls), "s1"), session(&fresh.sessions(0), "s1"));
+        // 状態は、何も読んでいない状態から全部読んだときと同じ
+        let mut fresh = State::default();
+        collect(&env.plain(), &mut fresh, &FakeSender::ok());
+        assert_eq!(built(&env, &st, "claude_code:s1"), built(&env, &fresh, "claude_code:s1"));
+    }
+
+    fn built(env: &Env, st: &State, key: &str) -> Session {
+        build_sessions(&env.plain(), st, 30 * 60_000).into_iter().find(|b| b.key == key).unwrap().session
+    }
+
+    #[test]
+    fn vanished_subagent_file_does_not_shrink_session() {
+        let env = Env::new("vanished_subagent");
+        let sender = FakeSender::ok();
+        let mut st = State::default();
+        collect(&env.plain(), &mut st, &sender);
+        let calls = sender.calls();
+        let before = built(&env, &st, "claude_code:s1");
+
+        std::fs::remove_file(env.claude().join("-tmp-demo/s1/subagents/agent-a1.jsonl")).unwrap();
+        let report = collect(&env.plain(), &mut st, &sender);
+        assert_eq!(sender.calls(), calls);
+        assert_eq!(report, CollectReport::default());
+        assert!(st.files.values().any(|e| matches!(&e.claude, Some((id, false, _)) if id == "s1")));
+        assert_eq!(built(&env, &st, "claude_code:s1"), before);
+    }
+
+    #[test]
+    fn vanished_codex_child_does_not_shrink_family() {
+        let env = Env::new("vanished_codex_child");
+        let sender = FakeSender::ok();
+        let mut st = State::default();
+        collect(&env.plain(), &mut st, &sender);
+        let calls = sender.calls();
+        let before = built(&env, &st, "codex:c1");
+
+        std::fs::remove_file(env.codex().join("sessions/2026/11/20/rollout-b.jsonl")).unwrap();
+        let report = collect(&env.plain(), &mut st, &sender);
+        assert_eq!(sender.calls(), calls);
+        assert_eq!(report, CollectReport::default());
+        assert!(st.files.values().any(|e| e.codex.as_ref().is_some_and(|c| c.thread_id.as_deref() == Some("c2"))));
+        assert_eq!(built(&env, &st, "codex:c1"), before);
+
+        // 系統のファイルが全部消えたら、途中結果も捨てる
+        std::fs::remove_file(env.codex().join("sessions/2026/11/20/rollout-a.jsonl")).unwrap();
+        collect(&env.plain(), &mut st, &sender);
+        assert_eq!(sender.calls(), calls);
+        assert!(!st.files.values().any(|e| e.codex.as_ref().is_some_and(|c| c.thread_id.as_deref() == Some("c2"))));
+    }
+
+    #[test]
+    fn whole_session_removed_drops_its_entries() {
+        let env = Env::new("whole_session_removed");
+        let sender = FakeSender::ok();
+        let mut st = State::default();
+        collect(&env.plain(), &mut st, &sender);
+        let calls = sender.calls();
+
+        std::fs::remove_file(env.claude().join("-tmp-demo/s2.jsonl")).unwrap();
+        let report = collect(&env.plain(), &mut st, &sender);
+        assert_eq!(sender.calls(), calls);
+        assert_eq!(report, CollectReport::default());
+        assert!(!st.files.values().any(|e| matches!(&e.claude, Some((id, _, _)) if id == "s2")));
+        assert!(st.files.values().any(|e| matches!(&e.claude, Some((id, _, _)) if id == "s1")));
+    }
+
+    #[test]
+    fn stat_failure_keeps_the_file_state() {
+        let env = Env::new("stat_failure");
+        let sender = FakeSender::ok();
+        let mut st = State::default();
+        collect(&env.plain(), &mut st, &sender);
+        let calls = sender.calls();
+
+        // 一覧には出るが stat できない（リンク先がない）
+        let s2 = env.claude().join("-tmp-demo/s2.jsonl");
+        std::fs::remove_file(&s2).unwrap();
+        std::os::unix::fs::symlink(env.root.join("missing.jsonl"), &s2).unwrap();
+        let report = collect(&env.plain(), &mut st, &sender);
+        assert_eq!(sender.calls(), calls);
+        assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+        assert!(report.errors[0].contains("cannot stat"));
+        assert!(st.files.values().any(|e| matches!(&e.claude, Some((id, _, _)) if id == "s2")));
+    }
+
+    #[test]
+    fn shrinking_session_is_skipped_and_reported() {
+        let env = Env::new("shrinking");
+        let sender = FakeSender::ok();
+        let mut st = State::default();
+        collect(&env.plain(), &mut st, &sender);
+        let calls = sender.calls();
+
+        // 送った記録の方が大きく、内容も違うことにする
+        let entry = st.sessions.get_mut("claude_code:s1").unwrap();
+        entry.sent_tokens += 1;
+        entry.sent_fingerprint = Some(12345);
+        let report = collect(&env.plain(), &mut st, &sender);
+        assert_eq!(sender.calls(), calls);
+        assert_eq!(report.sessions_changed, 1);
+        assert_eq!(report.sessions_sent, 0);
+        assert_eq!(report.errors, ["skipped shrinking session claude_code:s1"]);
+        assert_eq!(st.sessions["claude_code:s1"].sent_fingerprint, Some(12345));
+
+        // 送った記録と同じ大きさなら送り、記録を更新する
+        let s1 = built(&env, &st, "claude_code:s1");
+        st.sessions.get_mut("claude_code:s1").unwrap().sent_tokens -= 1;
+        collect(&env.plain(), &mut st, &sender);
+        assert_eq!(sender.ids(calls), ["s1"]);
+        let entry = &st.sessions["claude_code:s1"];
+        assert_ne!(entry.sent_fingerprint, Some(12345));
+        assert_eq!(entry.sent_messages, s1.blocks.iter().map(|b| u64::from(b.message_count)).sum::<u64>());
+        assert_eq!(entry.sent_tokens, 14 + 8 + 100 + 20); // サブエージェント分を含む
     }
 
     #[test]

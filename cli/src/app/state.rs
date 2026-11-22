@@ -43,6 +43,10 @@ pub struct SessionEntry {
     pub title: Option<String>,
     pub name_attempts: u8,
     pub sent_fingerprint: Option<u64>,
+    /// 最後に送ったときのブロックの message_count の合計
+    pub sent_messages: u64,
+    /// 最後に送ったときの input + output + cache_read + cache_write
+    pub sent_tokens: u64,
 }
 
 /// なければ空。読めない・壊れている・版が違うときは load_error に理由を残して空
@@ -72,7 +76,14 @@ pub fn save(path: &Path, s: &State) -> std::io::Result<()> {
     tmp_name.push(format!(".tmp{}", std::process::id()));
     let tmp = path.with_file_name(tmp_name);
     let json = serde_json::to_vec(s).map_err(std::io::Error::other)?;
-    std::fs::write(&tmp, json)?;
+    let written = std::fs::File::create(&tmp).and_then(|mut f| {
+        std::io::Write::write_all(&mut f, &json)?;
+        f.sync_all()
+    });
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
     std::fs::rename(&tmp, path).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })
@@ -132,7 +143,7 @@ mod tests {
         );
         s.sessions.insert(
             "claude_code:a".into(),
-            SessionEntry { title: Some("作業".into()), name_attempts: 1, sent_fingerprint: Some(u64::MAX) },
+            SessionEntry { title: Some("作業".into()), name_attempts: 1, sent_fingerprint: Some(u64::MAX), sent_messages: 9, sent_tokens: 1234 },
         );
         save(&path, &s).unwrap();
         let back = load(&path);
