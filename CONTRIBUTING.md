@@ -1,106 +1,56 @@
 # Contributing to Taskfolio
 
-Thanks for your interest in contributing! This guide describes how we branch, commit, and review changes.
+English · [日本語](CONTRIBUTING.ja.md) · [README](README.md)
 
-## Branching (GitHub Flow)
+## Run the development checks
 
-- `main` is always in a working state. Never commit directly to `main`.
-- Create a short-lived branch from the latest `main` for each change, then open a pull request.
-- Name branches `<type>/<short-description>` in lowercase kebab-case, using the same types as commit messages:
+From the repository root, use stable Rust for the CLI. Keep the collector lightweight and avoid heavy dependencies unless the change requires them.
 
-  | Example | Use for |
-  |---|---|
-  | `feat/cli-scan-command` | A new feature |
-  | `fix/codex-token-delta` | A bug fix |
-  | `docs/setup-guide` | Documentation only |
-  | `refactor/split-adapters` | Code changes that neither fix a bug nor add a feature |
-  | `test/claude-fixtures` | Adding or fixing tests |
-  | `chore/update-deps` | Tooling, dependencies, and maintenance |
-  | `ci/add-rust-workflow` | CI configuration |
-
-- Keep branches small and focused. One pull request should address one topic.
-
-## Commits
-
-### One logical change per commit
-
-- Each commit should contain exactly one logical change that can be understood and reverted on its own.
-- Keep tests in the same commit as the code they test.
-- Do not mix unrelated changes, such as a refactor and a bug fix, in one commit.
-- Each commit should build and pass the tests.
-
-### Commit message format (Conventional Commits)
-
-We follow [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/). Write messages in English.
-
-```
-<type>(<scope>): <summary>
-
-<body: optional, explains what and why>
-
-<footer: optional, e.g. "BREAKING CHANGE: ..." or "Closes #123">
+```sh
+cargo test --locked --manifest-path cli/Cargo.toml
+cargo build --locked --release --manifest-path cli/Cargo.toml
 ```
 
-- **type**: `feat`, `fix`, `docs`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`
-- **scope** (optional): `cli`, `api`, `web`, `db`, `deps`, `ci`
-- **summary**: imperative mood ("add", not "added" or "adds"), lowercase first letter, no trailing period, 72 characters or fewer
-- **body**: wrap at 72 characters. Explain *why* the change is needed when it is not obvious from the summary.
-- Mark breaking changes with `!` after the type or scope (for example, `feat(api)!: ...`) and describe them in a `BREAKING CHANGE:` footer.
+Use the Node version pinned in [worker/package.json](worker/package.json). Vitest runs the Worker tests against a local Workers runtime with D1.
 
-Examples:
-
+```sh
+cd worker
+npm ci
+npm run typecheck
+npm test
+npm run build:ui
 ```
+
+To serve the UI locally, copy `.dev.vars.example` to `.dev.vars`, set the three Access bindings, then run `npx wrangler d1 migrations apply DB --local` and `npx wrangler dev` from `worker/`. The API checks for a valid Access assertion on local requests too. Use the test suite for authenticated API scenarios. The [setup guide](SETUP.md) covers the full sign-in flow on a protected hostname. Keep your local `.dev.vars` out of Git.
+
+## Branches and commits
+
+Start a short-lived branch from the latest `main` and open a pull request for one topic. Keep `main` in a working state and make changes through pull requests. Use lowercase kebab-case branch names such as `feat/cli-scan-command`, `fix/codex-token-delta` or `docs/setup-guide`.
+
+Write commits in English using [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/). Use one logical change per commit, keep its tests with it, and make each commit buildable and independently reversible.
+
+```text
 feat(cli): add scan command with JSON and table output
 fix(cli): count Claude usage once per message and request id
 docs: add setup guide for Cloudflare Access
-chore(deps): bump serde_json to 1.0.140
 ```
+
+- Use `feat`, `fix`, `docs`, `refactor`, `perf`, `test`, `build`, `ci` or `chore` for the type. Use the same types in branch names.
+- Optional scopes include `cli`, `api`, `web`, `db`, `deps` and `ci`. Start the summary with a lowercase imperative verb. Keep it within 72 characters and omit the final period.
+- If the reason needs explanation, add a body wrapped at 72 characters. For a breaking change, use `!` after the type or scope and add a `BREAKING CHANGE:` footer.
 
 ## Pull requests
 
-1. Rebase your branch on the latest `main` before opening a pull request.
-2. Give the pull request a title in the same format as a commit message.
-3. Describe what changed, why, and how you tested it.
-4. Make sure all checks pass.
-5. Pull requests are merged with **Rebase and merge**, so the logical commits on your branch are kept as they are in `main`. Clean up "fix typo" or "wip" commits before review (for example, with `git rebase -i`).
+Rebase on the latest `main`, give the pull request a Conventional Commit title, and describe the change, its purpose and your checks. Ensure the checks pass and tidy up temporary commits before review. Use **Rebase and merge** to preserve the logical commits.
 
-## Development
+Explain any new data that leaves the Mac and its destination. Keep conversation bodies out of session ingest. Title generation and owner-authored board requests have separate data flows. Update both language editions when changing setup, privacy behavior or user-facing guidance. [Current data flows](README.md#what-leaves-your-mac)
 
-### CLI (`cli/`)
+## Release the production Worker
 
-Requirements: the stable Rust toolchain (install with [rustup](https://rustup.rs/)).
+The [Deploy Taskfolio workflow](.github/workflows/deploy-production.yml) publishes a selected `main` commit to the existing production Worker. For a new deployment, start with [Set up Taskfolio](SETUP.md).
 
-```bash
-cd cli
-cargo test
-cargo build --release
-```
+1. Configure the GitHub `production` environment for `main`. Set `CLOUDFLARE_ACCOUNT_ID` and `TASKFOLIO_DATABASE_ID` as environment variables and `CLOUDFLARE_API_TOKEN` as an environment secret. The existing production setup uses an Individual Workers Editor token scoped to the Worker.
+2. Apply pending D1 migrations with the database operator's credentials before publishing. The workflow builds, tests and deploys the Worker. The local `npm run deploy` script also applies migrations.
+3. In Actions, open **Deploy Taskfolio** and choose **Run workflow** on `main`. Select **Verify the release and Cloudflare connection without publishing** for a dry run and a remote versions check. For publication, clear the option. The run summary and Cloudflare version metadata identify the published commit.
 
-Keep the CLI lightweight: avoid async runtimes and heavy dependencies unless there is a clear need.
-
-### Worker (`worker/`)
-
-Requirements: Node (managed by [Volta](https://volta.sh/); the version is pinned in `worker/package.json`).
-
-```bash
-cd worker
-npm ci
-npm test            # runs Vitest inside the Workers runtime
-npm run typecheck
-```
-
-To run the Worker locally, copy `.dev.vars.example` to `.dev.vars` and fill in the values. `.dev.vars` is ignored by Git.
-
-## Privacy
-
-Taskfolio must never upload conversation text or prompts. Any change that sends new data off the user's machine needs a clear explanation in the pull request.
-
-## License
-
-By contributing, you agree that your contributions will be licensed under the [MIT License](LICENSE).
-
-### Publish the production Worker
-
-In GitHub Actions, open **Deploy Taskfolio**, select **Run workflow** on `main`, then run it. Select **Verify the release and Cloudflare connection without publishing** to build, test and check the connection only. A publication records the Git commit in the run summary and Cloudflare version metadata.
-
-The GitHub `production` environment permits deployments from the `main` branch. Its `CLOUDFLARE_API_TOKEN` secret has the Individual Workers Editor role for the Taskfolio Worker. The environment variables `CLOUDFLARE_ACCOUNT_ID` and `TASKFOLIO_DATABASE_ID` select the existing account and database. For releases with new D1 migrations, apply those migrations with the database operator's credentials before publishing.
+By contributing, you agree to license your contributions under the [MIT license](LICENSE).
