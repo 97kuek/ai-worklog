@@ -18,8 +18,8 @@ def main():
     state = args.state_dir.expanduser().resolve()
     if sys.platform != "darwin" or not binary.is_file() or not os.access(binary, os.X_OK):
         parser.error("Specify an executable Taskfolio binary on macOS.")
-    if not all((state / name).is_file() for name in ("config.json", "runner.json")):
-        parser.error("Set up the collector login and runner.json in the state directory first.")
+    if not (state / "config.json").is_file():
+        parser.error("Sign in with taskfolio login in the state directory first.")
     label = "dev.taskfolio.runner"
     domain = f"gui/{os.getuid()}"
     target = Path.home() / "Library" / "LaunchAgents" / (label + ".plist")

@@ -8,6 +8,11 @@ pub fn create_private_dir(path: &Path) -> std::io::Result<()> {
     DirBuilder::new().recursive(true).mode(0o700).create(path)
 }
 
+pub(crate) fn open_lock_file(home: &Path, name: &str) -> std::io::Result<std::fs::File> {
+    create_private_dir(home)?;
+    OpenOptions::new().create(true).truncate(false).write(true).mode(0o600).open(home.join(name))
+}
+
 /// 同じフォルダの一時ファイルに書いて fsync してから rename する。
 /// 途中で落ちても、元のファイルか新しいファイルのどちらかが残る。
 /// ファイルは自分だけが読み書きできる 0600、ないフォルダは 0700 で作る
