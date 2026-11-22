@@ -41,14 +41,18 @@ impl std::fmt::Debug for HttpSender {
 
 const MAX_BODY: u64 = 64 * 1024;
 
+fn read_limited(resp: &mut ureq::http::Response<ureq::Body>) -> String {
+    resp.body_mut()
+        .with_config()
+        .limit(MAX_BODY)
+        .lossy_utf8(true)
+        .read_to_string()
+        .unwrap_or_default()
+}
+
 impl Sender for HttpSender {
     fn send(&self, body: &str) -> Result<SendOk, SendError> {
-        let config = ureq::Agent::config_builder()
-            .max_redirects(0)
-            .http_status_as_error(false)
-            .timeout_global(Some(self.timeout))
-            .build();
-        let agent: ureq::Agent = config.into();
+        let agent = self.agent();
         let url = format!("{}/api/sessions", self.url.trim_end_matches('/'));
         let mut resp = agent
             .put(&url)
@@ -62,13 +66,7 @@ impl Sender for HttpSender {
             300..=399 | 401 | 403 => Err(SendError::Auth(status)),
             500..=599 => Err(SendError::Server(status)),
             _ => {
-                let text = resp
-                    .body_mut()
-                    .with_config()
-                    .limit(MAX_BODY)
-                    .lossy_utf8(true)
-                    .read_to_string()
-                    .unwrap_or_default();
+                let text = read_limited(&mut resp);
                 if (200..=299).contains(&status) {
                     serde_json::from_str::<SendOk>(&text)
                         .map_err(|_| SendError::Rejected { status, body: text })
@@ -81,6 +79,46 @@ impl Sender for HttpSender {
 }
 
 impl HttpSender {
+    /// `GET {url}/api/me`。成功したら `{"kind": ...}` の kind を返す
+    pub fn check_me(&self) -> Result<String, SendError> {
+        let url = format!("{}/api/me", self.url.trim_end_matches('/'));
+        let mut resp = self
+            .agent()
+            .get(&url)
+            .header("CF-Access-Client-Id", &self.client_id)
+            .header("CF-Access-Client-Secret", &self.client_secret)
+            .call()
+            .map_err(|e| SendError::Network(self.scrub(e.to_string())))?;
+        let status = resp.status().as_u16();
+        match status {
+            300..=399 | 401 | 403 => Err(SendError::Auth(status)),
+            500..=599 => Err(SendError::Server(status)),
+            _ => {
+                let text = read_limited(&mut resp);
+                if (200..=299).contains(&status) {
+                    #[derive(Deserialize)]
+                    struct Me {
+                        kind: String,
+                    }
+                    serde_json::from_str::<Me>(&text)
+                        .map(|m| m.kind)
+                        .map_err(|_| SendError::Rejected { status, body: text })
+                } else {
+                    Err(SendError::Rejected { status, body: text })
+                }
+            }
+        }
+    }
+
+    fn agent(&self) -> ureq::Agent {
+        ureq::Agent::config_builder()
+            .max_redirects(0)
+            .http_status_as_error(false)
+            .timeout_global(Some(self.timeout))
+            .build()
+            .into()
+    }
+
     fn scrub(&self, msg: String) -> String {
         if self.client_secret.is_empty() {
             msg
@@ -157,6 +195,21 @@ mod tests {
         assert!(lower.contains("cf-access-client-secret: the-secret-value"), "{req}");
         assert!(lower.contains("content-type: application/json"), "{req}");
         assert!(req.ends_with(r#"{"a":1}"#), "{req}");
+    }
+
+    #[test]
+    fn check_me_returns_kind() {
+        let (url, h) = serve(resp("200 OK", "", r#"{"kind":"machine"}"#));
+        assert_eq!(sender(url).check_me(), Ok("machine".to_string()));
+        let req = h.join().unwrap();
+        assert!(req.starts_with("GET /api/me "), "{req}");
+        assert!(req.to_lowercase().contains("cf-access-client-id: the-id.access"), "{req}");
+        let (url, h) = serve(resp("200 OK", "", "not json"));
+        assert!(matches!(sender(url).check_me(), Err(SendError::Rejected { status: 200, .. })));
+        h.join().unwrap();
+        let (url, h) = serve(resp("403 Forbidden", "", ""));
+        assert_eq!(sender(url).check_me(), Err(SendError::Auth(403)));
+        h.join().unwrap();
     }
 
     #[test]
