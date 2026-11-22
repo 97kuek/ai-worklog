@@ -73,7 +73,12 @@ for side, sign in (("L", -1), ("R", 1)):
         "Shin_" + side: (.124 * sign, -.280, .735),
         "Foot_" + side: (.124 * sign, -.209, .241),
     })
-for index, employee in enumerate(employees):
+# The first figures in the library occupy the runtime desks. Later collections
+# are spare editable models and do not need to ship with the Worker.
+desk_count = sum(anchor.name.startswith("DeskAnchor_") for anchor in anchors)
+if len(employees) < desk_count:
+    raise ValueError(f"Need {desk_count} employee collections for the office desks")
+for index, employee in enumerate(employees[:desk_count]):
     export(employee, f"employee-{index}", joints)
 bpy.data.collections.remove(staging)
 scene.render.resolution_percentage = 80
