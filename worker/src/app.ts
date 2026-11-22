@@ -5,6 +5,7 @@ import { registerRunnerRoutes } from "./routes/runner";
 import { registerRequestRoutes } from "./routes/requests";
 import { registerBlockRoutes } from "./routes/blocks";
 import { registerSessionRoutes } from "./routes/sessions";
+import { registerSettingsRoutes } from "./routes/settings";
 import { registerSkillRoutes } from "./routes/skills";
 
 export type Principal =
@@ -16,6 +17,11 @@ export type AppDeps = { authenticate: Authenticate; now?: () => number };
 export function createApp(deps: AppDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
   const now = () => deps.now?.() ?? Date.now();
+
+  app.use("/api/settings/*", async (c, next) => {
+    c.header("Cache-Control", "private, no-store");
+    await next();
+  });
 
   app.use("/api/*", async (c, next) => {
     const rawOwner = c.env.OWNER_EMAIL;
@@ -48,6 +54,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   registerSessionRoutes(app, now);
   registerRequestRoutes(app, now);
   registerRunnerRoutes(app, now);
+  registerSettingsRoutes(app, now);
   registerBlockRoutes(app);
   registerSkillRoutes(app);
 

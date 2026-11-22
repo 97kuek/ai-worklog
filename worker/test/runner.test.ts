@@ -288,3 +288,97 @@ it("validates project keys and engines on a move or an in-queue edit, even when 
   expect((await s.board()).requests[0]).toMatchObject(queued);
   expect((await s.put({ stage: "backlog" })).status).toBe(200);
 });
+
+it("lists collectors and legacy runners, and waits for the target Mac's next authenticated poll", async () => {
+  const s = await setup();
+  const list = async () => (await s.call("/api/settings", s.user, "GET")).json<{ machines: {id: string; online: boolean}[] }>();
+  expect(await list()).toEqual({ machines: [] });
+  const { machine_id: id } = await (await s.call("/api/me", s.mac, "GET")).json<{machine_id: string}>();
+  const machine = { id, name: "Mac " + id.slice(0, 8), seen_at: null, online: false, projects: [], engines: [], connection_test: null };
+  expect(await list()).toEqual({ machines: [machine] });
+  const path = "/api/settings/machines/" + id + "/test";
+  const requested_at = 1_800_000_000_000;
+  expect(await (await s.call(path, s.user, "POST", {})).json()).toEqual({ requested_at });
+  s.tick(10);
+  await s.claim(s.otherMac);
+  await s.call("/api/me", s.mac, "GET");
+  expect(await (await s.call(path, s.user, "POST", {})).json()).toEqual({ requested_at });
+  expect((await list()).machines.find(m => m.id === id)).toEqual({ ...machine, connection_test: { requested_at, acknowledged_at: null } });
+  s.tick(90_000 - 10);
+  const refreshed = requested_at + 90_000;
+  expect(await (await s.call(path, s.user, "POST", {})).json()).toEqual({ requested_at: refreshed });
+  s.tick(5);
+  await s.call("/api/runner/claim", s.mac, "PUT", { projects: ["demo","demo"], engines: ["codex"], machine_name: "Lab Mac" });
+  expect((await list()).machines.find(m => m.id === id)).toEqual({
+    ...machine, name: "Lab Mac", seen_at: refreshed + 5, online: true, engines: ["codex"],
+    projects: [{ key: "demo", enabled: true }], connection_test: { requested_at: refreshed, acknowledged_at: refreshed + 5 },
+  });
+  s.tick(2 * 60_000);
+  expect((await list()).machines.find(m => m.id === id)?.online).toBe(false);
+  expect(await (await s.call(path, s.user, "POST", {})).json()).toEqual({ requested_at: refreshed + 120_005 });
+});
+
+it("restricts machine settings to their owner, current local keys, and same-origin changes", async () => {
+  const s = await setup();
+  await s.claim();
+  const { machine_id } = await (await s.call("/api/me", s.mac, "GET")).json<{machine_id: string}>();
+  const path = "/api/settings/machines/" + machine_id;
+  const change = { project: "demo", enabled: false };
+  for (const [url, method, body] of [
+    ["/api/settings", "GET", undefined], [path + "/project", "PUT", change], [path + "/test", "POST", {}],
+  ] as const) {
+    expect((await s.call(url, s.mac, method, body)).status).toBe(403);
+    const anonymous = await s.call(url, "", method, body);
+    expect(anonymous.status).toBe(401);
+    expect(anonymous.headers.get("Cache-Control")).toContain("no-store");
+    if (body) expect((await s.call(url, s.user, method, body, "https://other.example")).status).toBe(403);
+    const other = { ...env, OWNER_EMAIL: "other@example.com" };
+    const response = await s.call(url, await s.userToken(other.OWNER_EMAIL), method, body, ORIGIN, other);
+    if (body) expect(response.status).toBe(404);
+    else expect(await response.json()).toEqual({ machines: [] });
+  }
+  expect((await s.call(path + "/project", s.user, "PUT", {project: "/unregistered", enabled: true})).status).toBe(404);
+  expect((await s.call(path + "/project", s.user, "PUT", {project: "demo", enabled: "false"})).status).toBe(400);
+});
+
+it("applies per-Mac project switches to queue validation, board choices, manual and automatic claims", async () => {
+  const s = await setup();
+  await s.queue();
+  const { machine_id } = await (await s.call("/api/me", s.mac, "GET")).json<{machine_id: string}>();
+  const switchProject = (enabled: boolean) => s.call("/api/settings/machines/" + machine_id + "/project", s.user, "PUT", {project: "demo", enabled});
+  const auto = () => s.call("/api/runner/claim", s.mac, "PUT", {...capabilities, auto_queue: true});
+  expect((await switchProject(false)).status).toBe(200);
+  expect((await switchProject(false)).status).toBe(200);
+  await s.claim(s.mac, {projects: [], engines: []});
+  expect(await (await auto()).json()).toEqual({job: null});
+  expect(await (await s.start(crypto.randomUUID())).json()).toEqual({error: "runner_unavailable"});
+  expect(await (await s.call("/api/board", s.user, "GET")).json()).not.toHaveProperty("runnerProjects");
+  expect((await s.put({stage: "backlog"})).status).toBe(200);
+  expect(await (await s.put({stage: "queued"})).json()).toEqual({error: "project_unregistered"});
+  await s.claim(s.otherMac, {projects: ["demo"], engines: ["claude_code"]});
+  expect(await (await s.put({stage: "queued"})).json()).toEqual({error: "engine_unavailable"});
+  expect((await switchProject(true)).status).toBe(200);
+  expect((await s.put({stage: "queued"})).status).toBe(200);
+  const attempt = crypto.randomUUID();
+  expect((await s.start(attempt)).status).toBe(200);
+  expect((await switchProject(false)).status).toBe(200);
+  expect(await (await s.claim()).json()).toEqual({job: null});
+  expect((await switchProject(true)).status).toBe(200);
+  expect(await (await s.claim()).json()).toMatchObject({job: {attempt_id: attempt}});
+  expect((await s.result(attempt, "running")).status).toBe(200);
+  expect((await switchProject(false)).status).toBe(200);
+  expect((await s.result(attempt, "completed")).status).toBe(200);
+});
+
+it("stops a previously delivered claim if its Mac loses permission before confirming execution", async () => {
+  const s = await setup();
+  await s.queue();
+  const attempt = crypto.randomUUID();
+  expect((await s.start(attempt)).status).toBe(200);
+  expect(await (await s.claim()).json()).toMatchObject({ job: { attempt_id: attempt } });
+  const { machine_id } = await (await s.call("/api/me", s.mac, "GET")).json<{machine_id: string}>();
+  const update = await s.call("/api/settings/machines/" + machine_id + "/project", s.user, "PUT", {project: "demo", enabled: false});
+  expect(update.status).toBe(200);
+  expect((await s.result(attempt, "running")).status).toBe(409);
+  expect((await s.board()).requests[0]?.launch).toMatchObject({state: "failed", error: "project_disabled"});
+});

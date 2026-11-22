@@ -1,4 +1,4 @@
-const ONLINE_FOR = 2 * 60_000;
+export const ONLINE_FOR = 2 * 60_000;
 const CLAIM_WITHIN = 10 * 60_000;
 
 export function isUuid(value: unknown): value is string {
@@ -6,9 +6,9 @@ export function isUuid(value: unknown): value is string {
 }
 
 export async function listRunnerProjects(db: D1Database, user: string) {
-  const { results } = await db.prepare(`SELECT DISTINCT p.value AS project FROM machines m
-    JOIN board_runners b ON b.machine_id=m.id CROSS JOIN json_each(b.projects) p
-    WHERE m.user_id=? ORDER BY project`).bind(user).all<{ project: string }>();
+  const { results } = await db.prepare(`SELECT DISTINCT p.project FROM machines m
+    JOIN runner_projects p ON p.machine_id=m.id
+    WHERE m.user_id=? AND p.enabled=1 ORDER BY p.project`).bind(user).all<{ project: string }>();
   return results.map(p => p.project);
 }
 
@@ -54,10 +54,9 @@ export async function startLaunch(db: D1Database, user: string, request: string,
       (user_id,request_id,attempt_id,machine_id,title,project,engine,model,effort,state,state_since)
       SELECT r.user_id,r.id,?,m.id,r.title,r.project,r.engine,r.model,r.effort,'pending',?
       FROM board_requests r JOIN machines m ON m.user_id=r.user_id
-      JOIN board_runners b ON b.machine_id=m.id
+      JOIN runner_projects b ON b.machine_id=m.id AND b.project=r.project AND b.enabled=1
       WHERE r.user_id=? AND r.id=? AND r.stage='queued' AND b.seen_at>?
         AND r.engine IN ('codex','claude_code')
-        AND r.project IN (SELECT value FROM json_each(b.projects))
         AND r.engine IN (SELECT value FROM json_each(b.engines))
       ORDER BY b.seen_at DESC, m.id LIMIT 1
       ON CONFLICT DO NOTHING`).bind(attempt, now, user, request, now - ONLINE_FOR),
@@ -80,10 +79,15 @@ export async function startLaunch(db: D1Database, user: string, request: string,
   return { error: "runner_unavailable" } as const;
 }
 
-export async function claimLaunch(db: D1Database, user: string, machine: string, projects: string[], engines: string[], autoQueue: boolean, now: number) {
+export async function claimLaunch(db: D1Database, user: string, machine: string, projects: string[], engines: string[], autoQueue: boolean, now: number, machineName?: string) {
   const capabilities = [JSON.stringify(projects), JSON.stringify(engines)];
   const statements = [
     expireUnstarted(db, user, now),
+    db.prepare(`UPDATE machines SET name=coalesce(?,name),
+        test_acknowledged_at=CASE WHEN test_acknowledged_at IS NULL AND test_requested_at<=?
+          THEN ? ELSE test_acknowledged_at END
+      WHERE id=? AND (name IS NOT coalesce(?,name) OR (test_acknowledged_at IS NULL AND test_requested_at<=?))`)
+      .bind(machineName ?? null, now, now, machine, machineName ?? null, now),
     db.prepare(`INSERT INTO board_runners(machine_id,projects,engines,seen_at) VALUES(?,?,?,?)
       ON CONFLICT(machine_id) DO UPDATE SET projects=excluded.projects,engines=excluded.engines,seen_at=excluded.seen_at`)
       .bind(machine, ...capabilities, now),
@@ -95,34 +99,44 @@ export async function claimLaunch(db: D1Database, user: string, machine: string,
       (user_id,request_id,attempt_id,machine_id,title,project,engine,model,effort,state,state_since)
       SELECT r.user_id,r.id,?,?,r.title,r.project,r.engine,r.model,r.effort,'pending',?
       FROM board_requests r ${latestQueueLaunch}
+      JOIN runner_projects p ON p.machine_id=? AND p.project=r.project AND p.enabled=1
       WHERE r.user_id=? AND r.stage='queued'
-        AND r.project IN (SELECT value FROM json_each(?)) AND r.engine IN (SELECT value FROM json_each(?))
+        AND r.engine IN (SELECT value FROM json_each(p.engines))
         AND (j.seq IS NULL OR (j.machine_id=? AND j.state='pending'))
         AND NOT EXISTS (SELECT 1 FROM board_launches WHERE machine_id=? AND state IN ('claimed','running'))
       ORDER BY r.queue_position LIMIT 1 ON CONFLICT DO NOTHING`)
-      .bind(crypto.randomUUID(), machine, now, user, ...capabilities, machine, machine));
+      .bind(crypto.randomUUID(), machine, now, machine, user, machine, machine));
   }
   statements.push(db.prepare(`UPDATE board_launches SET state='claimed',state_since=?
       WHERE seq=(SELECT j.seq FROM board_launches j JOIN board_requests r ON r.user_id=j.user_id AND r.id=j.request_id
+        JOIN runner_projects p ON p.machine_id=j.machine_id AND p.project=j.project AND p.enabled=1
         WHERE j.user_id=? AND j.machine_id=? AND j.state='pending'
-        AND j.project IN (SELECT value FROM json_each(?))
-        AND j.engine IN (SELECT value FROM json_each(?))
+        AND j.engine IN (SELECT value FROM json_each(p.engines))
         AND NOT EXISTS (SELECT 1 FROM board_launches WHERE machine_id=? AND state IN ('claimed','running'))
         ORDER BY r.queue_position,j.seq LIMIT 1)
       RETURNING attempt_id,request_id,title,project,engine,model,effort`)
-    .bind(now, user, machine, ...capabilities, machine));
+    .bind(now, user, machine, machine));
   const batch = await db.batch(statements);
   return batch[batch.length - 1]!.results[0] ?? null;
 }
 
 export async function reportResult(db: D1Database, user: string, machine: string, attempt: string, state: string, error: string | null, now: number) {
-  const [, , read] = await db.batch<{ state: string }>([
-    expireUnstarted(db, user, now),
+  const checks = [expireUnstarted(db, user, now)];
+  if (state === "running") {
+    // A prepared job may be resumed from the Mac's journal after the owner
+    // disabled its project. The runner waits for this acknowledgment to spawn.
+    checks.push(db.prepare(`UPDATE board_launches SET state='failed',error='project_disabled'
+      WHERE user_id=? AND machine_id=? AND attempt_id=? AND state='claimed'
+        AND project IN (SELECT project FROM runner_project_settings WHERE machine_id=? AND enabled=0)`)
+      .bind(user, machine, attempt, machine));
+  }
+  const batch = await db.batch<{ state: string }>([
+    ...checks,
     db.prepare(`UPDATE board_launches SET state=?,error=? WHERE user_id=? AND machine_id=? AND attempt_id=?
       AND ((state='claimed' AND ? IN ('running','failed')) OR (state='running' AND ? IN ('failed','completed')))`)
       .bind(state, error, user, machine, attempt, state, state),
     db.prepare("SELECT state FROM board_launches WHERE user_id=? AND machine_id=? AND attempt_id=?")
       .bind(user, machine, attempt),
   ]);
-  return read.results[0]?.state;
+  return batch[batch.length - 1]!.results[0]?.state;
 }
