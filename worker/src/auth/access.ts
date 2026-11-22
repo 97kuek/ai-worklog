@@ -5,7 +5,7 @@ import { type Authenticate, ConfigError } from "./identity";
 const nonEmpty = (v: unknown): v is string => typeof v === "string" && v.length > 0;
 
 export function createAccessAuthenticator(
-  getKeys: (teamDomain: string) => Promise<HonoJsonWebKey[]>,
+  getKeys: (teamDomain: string, opts?: { refresh?: boolean }) => Promise<HonoJsonWebKey[]>,
 ): Authenticate {
   return async (req, env) => {
     const teamDomain = env.ACCESS_TEAM_DOMAIN;
@@ -19,7 +19,16 @@ export function createAccessAuthenticator(
     if (!token) return null;
 
     // Key fetch failures propagate (not an auth failure).
-    const keys = await getKeys(teamDomain);
+    let kid: string | undefined;
+    try {
+      kid = Jwt.decode(token).header.kid;
+    } catch {
+      return null;
+    }
+
+    let keys = await getKeys(teamDomain);
+    // Signing keys may have rotated since the cache was filled: refetch once.
+    if (!keys.some((k) => k.kid === kid)) keys = await getKeys(teamDomain, { refresh: true });
 
     let payload: Record<string, unknown>;
     try {
