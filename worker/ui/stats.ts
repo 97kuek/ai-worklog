@@ -2,9 +2,11 @@ import { filterMenu } from "./filter-menu.js";
 import { duration, summarizeActivity, type ActivityBucket, type ProjectKey } from "./activity.js";
 import { addDays, dayLabel, el, engineName, weekday, type WeekData } from "./shared.js";
 
-function hourLabel(hour: number) {
-  return String(hour).padStart(2, "0") + ":00–" + String(hour + 1).padStart(2, "0") + ":00";
+function clockMinute(minutes: number) {
+  return String(Math.floor(minutes / 60)).padStart(2, "0") + ":" + String(minutes % 60).padStart(2, "0");
 }
+
+const zone = new Intl.DateTimeFormat("en-US", { timeZoneName: "shortOffset" });
 
 function chartCeiling(peakMs: number) {
   const peakMinutes = peakMs / 60_000;
@@ -63,8 +65,18 @@ export function renderStats(root: HTMLElement, data: WeekData, start: Date, end:
   const total = el("div", "stats-total");
   total.append(el("strong", "", duration(stats.totalMs)));
   head.append(title, total);
-  const buckets = weekly ? stats.days : stats.hours;
-  const ceiling = chartCeiling(Math.max(...buckets.map(b => b.ms)));
+  const buckets = weekly ? stats.days : stats.hourlySlots.map(slot => slot.activity);
+  const ceiling = weekly ? chartCeiling(Math.max(...buckets.map(b => b.ms))) : 3_600_000;
+  const hourLabels = weekly
+    ? stats.hours.map((_, hour) => clockMinute(hour * 60) + "–" + clockMinute((hour + 1) * 60))
+    : stats.hourlySlots.map(({ from, to, hour }) => {
+      const date = new Date(from);
+      const minutes = hour * 60 + date.getMinutes();
+      const range = clockMinute(minutes) + "–" + clockMinute(minutes + (to - from) / 60_000);
+      if (stats.hourlySlots.filter(slot => slot.hour === hour).length === 1) return range;
+      const offset = zone.formatToParts(date).find(part => part.type === "timeZoneName")!.value;
+      return range + " " + offset;
+    });
   const plot = el("div", weekly ? "stats-plot weekly-plot" : "stats-plot");
   const axis = el("div", "stats-axis");
   axis.setAttribute("aria-hidden", "true");
@@ -74,11 +86,14 @@ export function renderStats(root: HTMLElement, data: WeekData, start: Date, end:
   area.setAttribute("aria-label", title.textContent!);
   const ticks = el("div", "stats-ticks");
   ticks.setAttribute("aria-hidden", "true");
+  if (!weekly) {
+    area.style.gridTemplateColumns = ticks.style.gridTemplateColumns = `repeat(${buckets.length}, minmax(0, 1fr))`;
+  }
   const bars = buckets.map((bucket, index) => {
     const button = el("button", "stats-hour");
     button.type = "button";
     const date = addDays(start, index);
-    const label = [weekly ? dayLabel.format(date) : hourLabel(index), duration(bucket.ms)];
+    const label = [weekly ? dayLabel.format(date) : hourLabels[index], duration(bucket.ms)];
     const stack = el("span", "stats-stack");
     stack.style.height = (100 * bucket.ms / ceiling) + "%";
     for (const group of series) {
@@ -97,7 +112,8 @@ export function renderStats(root: HTMLElement, data: WeekData, start: Date, end:
       button.onclick = () => options.openDay(date, named);
     } else {
       button.onclick = () => selectHour(select.trigger.value === String(index) ? "" : String(index));
-      ticks.append(el("span", "", index % 3 === 0 || index === 23 ? String(index).padStart(2, "0") : ""));
+      const hour = stats.hourlySlots[index]!.hour;
+      ticks.append(el("span", "", hour % 3 === 0 || hour === 23 ? String(hour).padStart(2, "0") : ""));
     }
     area.append(button);
     return button;
@@ -115,6 +131,7 @@ export function renderStats(root: HTMLElement, data: WeekData, start: Date, end:
     legend.append(item);
   }
   chart.append(head, plot);
+  head.title = "Overlapping work counts once. Shared time is split equally between active projects.";
   if (legend.childElementCount) chart.append(legend);
 
   const projects = el("section", "stats-models");
@@ -125,7 +142,7 @@ export function renderStats(root: HTMLElement, data: WeekData, start: Date, end:
 
   const models = el("section", "stats-models");
   const modelHead = el("div", "stats-head");
-  const hours: [string, string][] = Array.from({ length: 24 }, (_, hour) => [String(hour), hourLabel(hour)]);
+  const hours: [string, string][] = hourLabels.map((label, i) => [String(i), label]);
   const select = filterMenu("stats-hour-filter", "Filter by hour", [["", "All hours"], ...hours],
     root.querySelector<HTMLButtonElement>("#stats-hour-filter")?.value ?? "", selectHour);
   const selection = el("span", "stats-selection");
@@ -139,7 +156,7 @@ export function renderStats(root: HTMLElement, data: WeekData, start: Date, end:
   function selectHour(value: string) {
     select.setValue(value);
     if (!weekly) bars.forEach((button, i) => button.setAttribute("aria-pressed", String(value === String(i))));
-    const bucket = value === "" ? undefined : stats.hours[Number(value)];
+    const bucket = value === "" ? undefined : (weekly ? stats.hours : buckets)[Number(value)];
     selection.textContent = bucket ? duration(bucket.ms) : "";
     const selected = bucket ?? stats.period;
     projectResults.replaceChildren(projectTable(selected));

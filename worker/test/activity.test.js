@@ -11,7 +11,7 @@ const sessions = [
   { id: "c", tool: "unknown", models: [] },
 ];
 
-it("clips to the reporting day, sums concurrent tasks and counts unique model users", () => {
+it("clips to the reporting day, merges concurrent tasks and counts unique model users", () => {
   const blocks = [
     block("a", at(21, 23, 50), at(22, 0, 15)),
     block("a", at(22, 0, 30), at(22, 1, 30)),
@@ -22,8 +22,8 @@ it("clips to the reporting day, sums concurrent tasks and counts unique model us
   ];
   const s = summarizeActivity({ sessions, blocks }, start, at(23, 0));
   expect(s.hours[0].ms).toBe(45 * 60000);
-  expect(s.hours[1].ms).toBe(60 * 60000);
-  expect(s.totalMs).toBe(105 * 60000);
+  expect(s.hours[1].ms).toBe(30 * 60000);
+  expect(s.totalMs).toBe(75 * 60000);
   expect(s.modelCounts(s.tasks)).toEqual([
     { tool: "codex", model: "model B", effort: null, count: 2 },
     { tool: "codex", model: "model A", effort: null, count: 1 },
@@ -82,10 +82,22 @@ it("groups clipped work by weekday and project and counts unique tasks in each s
     block("c", at(29, 0), at(29, 1)),
   ];
   const s = summarizeActivity({ sessions: projects, blocks }, start, at(29, 0));
-  expect(s.days.map(day => day.ms / 60000)).toEqual([135, 40, 0, 0, 0, 0, 0]);
-  expect(s.period.projects.get("studio")).toEqual({ ms: 165 * 60000, tasks: new Set(["a", "b"]) });
+  expect(s.days.map(day => day.ms / 60000)).toEqual([90, 30, 0, 0, 0, 0, 0]);
+  expect(s.period.projects.get("studio")).toEqual({ ms: 115 * 60000, tasks: new Set(["a", "b"]) });
   expect(s.days[1].projects.get("studio").tasks.size).toBe(1);
   expect(s.days[2].projects.get(null)).toEqual({ ms: 0, tasks: new Set(["c"]) });
-  expect(s.hours[0].projects.get(null).ms).toBe(10 * 60000);
+  expect(s.hours[0].projects.get(null).ms).toBe(5 * 60000);
   expect(s.days.reduce((sum, day) => sum + day.ms, 0)).toBe(s.totalMs);
+});
+
+it("splits only shared minutes across distinct projects even with duplicate or overlapping blocks", () => {
+  const projects = [{ ...sessions[0], project: "A" }, { ...sessions[1], project: "A" }, { ...sessions[2], project: "B" }];
+  const whole = block("a", at(22, 15), at(22, 16));
+  const blocks = [whole, whole, block("b", at(22, 15, 10), at(22, 15, 55)), block("c", at(22, 15, 20), at(22, 15, 50))];
+  const stats = summarizeActivity({ sessions: projects, blocks }, start, at(23, 0));
+  for (const bucket of [stats.period, stats.days[0], stats.hours[15], stats.hourlySlots[15].activity]) {
+    expect(bucket.ms).toBe(60 * 60000);
+    expect(bucket.projects.get("A")).toEqual({ ms: 45 * 60000, tasks: new Set(["a", "b"]) });
+    expect(bucket.projects.get("B")).toEqual({ ms: 15 * 60000, tasks: new Set(["c"]) });
+  }
 });
