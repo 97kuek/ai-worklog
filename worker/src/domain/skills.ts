@@ -1,7 +1,9 @@
+import { isClaudeAccount, type ClaudeAccount } from "../../ui/claude-accounts";
+
 export const SKILL_TOOLS = ["claude_code", "codex"] as const;
 export type SkillTool = typeof SKILL_TOOLS[number];
 export type Skill = { tool: SkillTool; name: string; description: string };
-export type SkillInventory = { tools: SkillTool[]; skills: Skill[] };
+export type SkillInventory = { tools: SkillTool[]; skills: Skill[]; account?: ClaudeAccount };
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
@@ -13,10 +15,15 @@ const invalid = (path: string, message: string) => ({ ok: false as const, path, 
 
 export function parseSkillInventory(input: unknown) {
   if (!isRecord(input)) return invalid("", "must be an object");
-  const tools: unknown = input.tools === undefined ? [...SKILL_TOOLS] : input.tools;
+  const { account } = input;
+  if (account !== undefined && !isClaudeAccount(account)) return invalid("account", "unknown Claude account");
+  const tools: unknown = input.tools === undefined ? (account ? ["claude_code"] : [...SKILL_TOOLS]) : input.tools;
   if (!Array.isArray(tools) || tools.length < 1 || tools.length > 2 || !tools.every(isTool)
     || new Set(tools).size !== tools.length) {
     return invalid("tools", "must contain one or both of claude_code and codex without duplicates");
+  }
+  if (account && (tools.length !== 1 || tools[0] !== "claude_code")) {
+    return invalid("tools", "a Claude account can only replace Claude Code skills");
   }
   if (!Array.isArray(input.skills) || input.skills.length > 1024) {
     return invalid("skills", "must be an array of at most 1024 items");
@@ -25,6 +32,7 @@ export function parseSkillInventory(input: unknown) {
   for (const [i, row] of input.skills.entries()) {
     const path = `skills[${i}]`;
     if (!isRecord(row)) return invalid(path, "must be an object");
+    if ("account" in row) return invalid(`${path}.account`, "declare one account on the inventory");
     const { tool, name, description } = row;
     if (!isTool(tool) || !tools.includes(tool)) return invalid(`${path}.tool`, "must be a declared tool");
     if (typeof name !== "string" || !fitsLength(name, 256) || !name.trim()) {
@@ -35,5 +43,5 @@ export function parseSkillInventory(input: unknown) {
     }
     skills.push({ tool, name, description });
   }
-  return { ok: true as const, value: { tools, skills } satisfies SkillInventory };
+  return { ok: true as const, value: { tools, skills, account } satisfies SkillInventory };
 }

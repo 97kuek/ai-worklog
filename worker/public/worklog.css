@@ -444,7 +444,10 @@ select {
   width: 16%;
 }
 .skills-table th:nth-child(2) {
-  width: 26%;
+  width: 17%;
+}
+.skills-table th:nth-child(3) {
+  width: 24%;
 }
 .skills-table td {
   padding: 12px 14px;
@@ -720,7 +723,7 @@ main:focus {
   border: 0;
 }
 .edit-title img { width: 16px; height: 16px; opacity: .72; }
-.skills-filter { display: flex; justify-content: flex-end; margin-bottom: 10px; }
+.skills-filter { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; margin-bottom: 10px; }
 .title-editor { width: 100%; }
 .title-editor input {
   width: 100%;
@@ -823,7 +826,7 @@ main:focus {
   .skills-table tbody tr { display: flex; flex-direction: column; gap: 4px; padding: 12px; border-bottom: 1px solid var(--line-soft); }
   .skills-table tbody tr:last-child { border: 0; }
   .skills-table tbody td { display: block; border: 0; padding: 0; }
-  .skills-table tbody td:nth-child(2) { order: -1; font-weight: 700; }
+  .skills-table tbody td:nth-child(3) { order: -1; font-weight: 700; }
   .skills-table tbody td:first-child { color: var(--muted); }
   .filter-dialog { margin: auto auto max(8px, env(safe-area-inset-bottom)); width: calc(100% - 16px); }
 }
