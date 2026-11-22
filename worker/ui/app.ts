@@ -16,9 +16,10 @@ import { renderBoard } from "./board.js";
 import { showTitle, editTaskTitle } from "./title-editor.js";
 import { renderDetail } from "./detail.js";
 import { renderStats } from "./stats.js";
+import { renderSettings, type RunnerSettings } from "./settings.js";
 import { renderSkills, type Skill } from "./skills.js";
 
-const pages = { log: "Work log", calendar: "Calendar", board: "Board", stats: "Activity", skills: "Skills", office: "Office" };
+const pages = { log: "Work log", calendar: "Calendar", board: "Board", stats: "Activity", skills: "Skills", office: "Office", settings: "Settings" };
 type View = keyof typeof pages;
 function node<T extends HTMLElement>(id: string) {
   return document.getElementById(id) as T;
@@ -192,11 +193,11 @@ async function complete(id: string) {
 function syncHead() {
   document.title = pages[view] + " | Taskfolio";
   node("title").textContent = pages[view];
-  for (const a of document.querySelectorAll<HTMLAnchorElement>("nav a")) {
+  for (const a of document.querySelectorAll<HTMLAnchorElement>("nav a, #open-settings")) {
     if (a.hash === "#" + view) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   }
-  node("week-controls").hidden = view === "board" || view === "skills" || view === "office";
+  node("week-controls").hidden = view === "board" || view === "skills" || view === "office" || view === "settings";
   node("stats-period").hidden = view !== "stats";
   for (const period of ["daily", "weekly"] as const) {
     node(period).setAttribute("aria-pressed", String(statsPeriod === period));
@@ -233,7 +234,7 @@ async function load(done = "") {
   syncHead();
   const start = rangeStart();
   const end = addDays(start, isDaily() ? 1 : 7);
-  const scope = view === "board" || view === "skills" || view === "office" ? view : view + localDate(start) + localDate(end);
+  const scope = view === "board" || view === "skills" || view === "office" || view === "settings" ? view : view + localDate(start) + localDate(end);
   root.setAttribute("aria-busy", "true");
   if (displayedScope !== scope) {
     displayedScope = undefined;
@@ -249,6 +250,20 @@ async function load(done = "") {
       if (controller.signal.aborted) return;
       officeModule = module;
       module.renderOffice(root, data.sessions, showDetail);
+    } else if (view === "settings") {
+      const read = () => api<RunnerSettings>("/api/settings", { signal: controller.signal });
+      const settings = await read();
+      if (controller.signal.aborted) return;
+      renderSettings(root, settings, {
+        read,
+        updateFolder: (id, project, enabled) => api("/api/settings/machines/" + encodeURIComponent(id) + "/project", {
+          method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ project, enabled }),
+          signal: controller.signal,
+        }),
+        test: id => api("/api/settings/machines/" + encodeURIComponent(id) + "/test", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: "{}", signal: controller.signal,
+        }),
+      }, controller.signal);
     } else if (view === "skills") {
       const data = await api<{ skills: Skill[] }>("/api/skills", { signal: controller.signal });
       if (controller.signal.aborted) return;
