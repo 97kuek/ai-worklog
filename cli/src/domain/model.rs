@@ -1,19 +1,19 @@
 use std::collections::BTreeSet;
 use std::ops::AddAssign;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// UTC epoch milliseconds.
 pub type Millis = i64;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Tool {
     ClaudeCode,
     Codex,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub input: u64,
     pub output: u64,
@@ -30,14 +30,14 @@ impl AddAssign for TokenUsage {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TokenEvent {
     pub at: Millis,
     pub usage: TokenUsage,
 }
 
 /// A session as read from one tool's logs, before blocks are built.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct RawSession {
     /// Adapters always set this to `Some`.
     pub tool: Option<Tool>,
@@ -50,6 +50,15 @@ pub struct RawSession {
     /// Timestamps of activity, in any order.
     pub activity: Vec<Millis>,
     pub token_events: Vec<TokenEvent>,
+}
+
+impl RawSession {
+    /// 子（サブエージェントなど）の activity、token_events、models を足す。メタ情報は自分のものを残す
+    pub fn absorb(&mut self, child: RawSession) {
+        self.activity.extend(child.activity);
+        self.token_events.extend(child.token_events);
+        self.models.extend(child.models);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
