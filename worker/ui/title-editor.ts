@@ -28,8 +28,10 @@ export function editTaskTitle(
     const label = el("label", "", "Task title");
     label.htmlFor = "edited-task-title";
     label.id = "detail-title";
+    label.hidden = true;
     const field = el("input");
     field.id = label.htmlFor;
+    field.setAttribute("aria-labelledby", label.id);
     field.required = true;
     field.maxLength = 200;
     field.value = session.title ?? "";

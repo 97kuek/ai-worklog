@@ -722,7 +722,6 @@ main:focus {
 .edit-title img { width: 16px; height: 16px; opacity: .72; }
 .skills-filter { display: flex; justify-content: flex-end; margin-bottom: 10px; }
 .title-editor { width: 100%; }
-.title-editor label { display: block; color: var(--muted); }
 .title-editor input {
   width: 100%;
   margin-block: 4px 8px;
