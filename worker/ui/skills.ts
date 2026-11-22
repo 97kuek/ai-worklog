@@ -1,6 +1,6 @@
 import { CLAUDE_ACCOUNTS, type ClaudeAccount } from "./claude-accounts.js";
 import { filterMenu } from "./filter-menu.js";
-import { el, engineName } from "./shared.js";
+import { dataTable, el, engineName } from "./shared.js";
 
 export interface Skill {
   tools: ("claude_code" | "codex")[];
@@ -15,14 +15,7 @@ export function renderSkills(root: HTMLElement, skills: Skill[]) {
     return;
   }
 
-  const table = el("table", "skills-table");
-  table.setAttribute("aria-label", "Available skills");
-  const header = table.createTHead().insertRow();
-  for (const label of ["Tools", "Account", "Skill", "Description"]) {
-    const column = el("th", "", label);
-    column.scope = "col";
-    header.append(column);
-  }
+  const table = dataTable("skills-table", "Available skills", ["Tools", "Account", "Skill", "Description"]);
 
   const body = table.createTBody();
   const filter = filterMenu("skills-tool", "Filter by tool",

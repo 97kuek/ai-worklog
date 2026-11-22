@@ -1,6 +1,6 @@
 import { filterMenu } from "./filter-menu.js";
 import { duration, summarizeActivity, type ActivityBucket, type ProjectKey } from "./activity.js";
-import { addDays, dayLabel, el, engineName, weekday, type WeekData } from "./shared.js";
+import { addDays, dayLabel, dataTable, el, engineName, weekday, type WeekData } from "./shared.js";
 
 function clockMinute(minutes: number) {
   return String(Math.floor(minutes / 60)).padStart(2, "0") + ":" + String(minutes % 60).padStart(2, "0");
@@ -68,14 +68,7 @@ function projectPie(bucket: ActivityBucket, series: ProjectSeries[]) {
 }
 
 function projectTable(bucket: ActivityBucket) {
-  const table = el("table", "stats-table project-table");
-  table.setAttribute("aria-label", "Project activity");
-  const header = table.createTHead().insertRow();
-  for (const label of ["Project", "Active time", "Share", "Tasks"]) {
-    const th = el("th", "", label);
-    th.scope = "col";
-    header.append(th);
-  }
+  const table = dataTable("stats-table project-table", "Project activity", ["Project", "Active time", "Share", "Tasks"]);
   const body = table.createTBody();
   for (const [key, entry] of rankedProjects(bucket)) {
     const row = body.insertRow();
@@ -216,14 +209,7 @@ export function renderStats(root: HTMLElement, data: WeekData, start: Date, end:
       results.replaceChildren(el("p", "stats-empty-hour", bucket ? "No work blocks in this hour." : "No work blocks in this period."));
       return;
     }
-    const table = el("table", "stats-table");
-    table.setAttribute("aria-label", "Models used by the selected tasks");
-    const heading = table.createTHead().insertRow();
-    for (const name of ["Engine", "Model", "Effort", "Tasks"]) {
-      const th = el("th", "", name);
-      th.scope = "col";
-      heading.append(th);
-    }
+    const table = dataTable("stats-table", "Models used by the selected tasks", ["Engine", "Model", "Effort", "Tasks"]);
     const body = table.createTBody();
     for (const { tool, model, effort, count } of counts) {
       const row = body.insertRow();
