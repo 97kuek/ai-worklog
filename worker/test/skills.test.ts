@@ -22,7 +22,8 @@ async function setup() {
     const res = await request(user);
     expect(res.status).toBe(200);
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
-    return (await res.json<{ skills: { tools: string[]; accounts: (string | null)[]; name: string; description: string }[] }>()).skills;
+    const { skills } = await res.json<{ skills: { tools: string[]; profiles: { tool: string; account: string | null }[]; name: string; description: string }[] }>();
+    return skills.map(({ profiles, ...skill }) => ({ ...skill, accounts: profiles.filter(p => p.tool === "claude_code").map(p => p.account) }));
   }
   return { machine, user, machineToken, userToken, request, put, list };
 }
@@ -80,14 +81,14 @@ it("replaces snapshots by Claude account without attributing old or other-machin
     { tools: ["claude_code"], accounts: ["w-claude", null], name: "legacy", description: "Review code" },
     { tools: ["claude_code", "codex"], accounts: ["w-claude"], name: "review", description: "Review code" },
   ]);
-  await put({ account: "p-claude", tools: ["claude_code"], skills: [claude] });
-  expect((await list()).map(row => row.accounts)).toEqual([["w-claude", null], ["p-claude", "w-claude"]]);
+  await put({ account: "studio", primary: true, tools: ["claude_code"], skills: [claude] });
+  expect((await list()).map(row => row.accounts)).toEqual([["w-claude", null], ["studio", "w-claude"]]);
   await put({ tools: ["claude_code"], skills: [] }, other);
   expect((await list())[0]?.accounts).toEqual(["w-claude"]);
   await put({ account: "w-claude", skills: [] });
   await put({ tools: ["claude_code"], skills: [] });
   expect(await list()).toEqual([
-    { tools: ["claude_code", "codex"], accounts: ["p-claude"], name: "review", description: "Review code" },
+    { tools: ["claude_code", "codex"], accounts: ["studio"], name: "review", description: "Review code" },
   ]);
 });
 
@@ -101,7 +102,7 @@ it("isolates owners sharing the same database", async () => {
   await put({ skills: [] });
   expect(await list()).toEqual([]);
   expect(await (await request(otherUser, undefined, other)).json()).toEqual({
-    skills: [{ tools: ["claude_code"], accounts: [null], name: claude.name, description: claude.description }],
+    skills: [{ tools: ["claude_code"], profiles: [{ tool: "claude_code", account: null }], name: claude.name, description: claude.description }],
   });
 });
 
@@ -109,8 +110,8 @@ it("rejects invalid snapshots without changing the previous list", async () => {
   const { put, list, request, machine } = await setup();
   await put({ skills: [codex] });
   for (const payload of [
-    { account: "p-claude", tools: ["codex"], skills: [] },
-    { account: "w-claude", skills: [codex] }, { account: "invalid", skills: [] },
+    { account: "work", tools: ["codex", "claude_code"], skills: [] },
+    { account: "w-claude", skills: [codex] }, { account: "../invalid", skills: [] },
     { skills: [{ ...claude, account: "w-claude" }] },
     {}, { skills: null }, { skills: Array(1025).fill(codex) },
     { skills: [claude], tools: ["codex"] }, { skills: [], tools: [] },
@@ -148,4 +149,13 @@ it("rolls back the delete and earlier insert chunks when a later write fails", a
     spy.mockRestore();
     await env.DB.prepare("DROP TRIGGER fail_skill_insert").run();
   }
+});
+
+it("preserves account-to-tool associations on a shared skill", async () => {
+  const { put, request, user } = await setup();
+  await put({ tools: ["codex"], account: "team", skills: [codex] });
+  await put({ tools: ["claude_code"], account: "personal", skills: [claude] });
+  expect(await (await request(user)).json()).toMatchObject({ skills: [{ profiles: [
+    { tool: "claude_code", account: "personal" }, { tool: "codex", account: "team" },
+  ] }] });
 });

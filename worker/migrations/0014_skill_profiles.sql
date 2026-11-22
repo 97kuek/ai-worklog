@@ -1,7 +1,7 @@
 CREATE TABLE machine_skills_profiled (
   machine_id TEXT NOT NULL REFERENCES machines(id) ON DELETE CASCADE,
   tool TEXT NOT NULL CHECK (tool IN ('claude_code', 'codex')),
-  account TEXT NOT NULL DEFAULT '' CHECK (account = '' OR (tool = 'claude_code' AND account IN ('p-claude', 'w-claude'))),
+  account TEXT NOT NULL DEFAULT '',
   name TEXT NOT NULL,
   description TEXT NOT NULL,
   PRIMARY KEY (machine_id, tool, account, name, description)
