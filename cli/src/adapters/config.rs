@@ -41,10 +41,10 @@ impl Default for NamingConfig {
 
 /// `$AI_WORKLOG_HOME` if set, else `$HOME/.ai-worklog`.
 pub fn home_dir() -> PathBuf {
-    if let Some(h) = std::env::var_os("AI_WORKLOG_HOME") {
-        if !h.is_empty() {
-            return PathBuf::from(h);
-        }
+    if let Some(h) = std::env::var_os("AI_WORKLOG_HOME")
+        && !h.is_empty()
+    {
+        return PathBuf::from(h);
     }
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     home.join(".ai-worklog")
