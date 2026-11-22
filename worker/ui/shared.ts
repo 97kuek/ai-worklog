@@ -56,6 +56,18 @@ export function titleOf(s: Session) {
 export function countLabel(count: number, noun: string) {
   return count.toLocaleString("en-US") + " " + noun + (count === 1 ? "" : "s");
 }
+export function dataTable(className: string, label: string, columns: readonly string[]) {
+  const table = el("table", className);
+  table.setAttribute("aria-label", label);
+  const header = table.createTHead().insertRow();
+  for (const name of columns) {
+    const cell = el("th", "", name);
+    cell.scope = "col";
+    header.append(cell);
+  }
+  return table;
+}
+
 export function engineName(tool: string) {
   return ({ claude_code: "Claude Code", codex: "Codex" } as Record<string, string>)[tool] ?? tool;
 }
