@@ -16,7 +16,8 @@ fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
-/// launchd のジョブ定義。10分ごとと、ログイン時に `ai-worklog collect` を動かす
+/// launchd のジョブ定義。10分ごとと、ログイン時に `ai-worklog collect` を動かす。
+/// 報告は collect.log に残るので標準出力は捨て、標準エラーだけ launchd.log に残す
 pub fn launch_agent_plist(exe: &Path, home: &Path) -> String {
     let exe = xml_escape(&exe.display().to_string());
     let log = xml_escape(&home.join("logs").join("launchd.log").display().to_string());
@@ -54,7 +55,7 @@ pub fn launch_agent_plist(exe: &Path, home: &Path) -> String {
     <string>{path}</string>
   </dict>
   <key>StandardOutPath</key>
-  <string>{log}</string>
+  <string>/dev/null</string>
   <key>StandardErrorPath</key>
   <string>{log}</string>
 </dict>
@@ -304,8 +305,10 @@ mod tests {
             "<key>ProcessType</key>",
             "<string>Background</string>",
             "LowPriorityIO",
-            "/Users/x/.ai-worklog/logs/launchd.log",
             "<string>dev.ai-worklog.collect</string>",
+            // 報告は collect.log に残るので、標準出力は捨てる。標準エラーだけ launchd.log へ
+            "<key>StandardOutPath</key>\n  <string>/dev/null</string>",
+            "<key>StandardErrorPath</key>\n  <string>/Users/x/.ai-worklog/logs/launchd.log</string>",
         ] {
             assert!(p.contains(needle), "missing {needle}: {p}");
         }
