@@ -7,6 +7,7 @@ import {
   type Session,
   type WeekData,
 } from "./shared.js";
+import { installDatePicker } from "./date-picker.js";
 import { renderLog, type LogFilters } from "./log.js";
 import { renderCalendar } from "./calendar.js";
 import { renderBoard } from "./board.js";
@@ -159,11 +160,14 @@ function syncHead() {
   const label = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" });
   const shortLabel = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" });
   const fullRange = daily ? label.format(start) : label.formatRange(start, end);
-  const compactRange = daily ? label.format(start) : shortLabel.format(start) + "\n– " + shortLabel.format(end);
-  const startDate = localDate(start);
+  const compactLabel = start.getFullYear() === new Date().getFullYear() && end.getFullYear() === start.getFullYear()
+    ? shortLabel
+    : new Intl.DateTimeFormat("en-US", { month: "numeric", day: "numeric", year: "2-digit" });
+  const compactRange = daily
+    ? shortLabel.format(start) + "\n" + start.getFullYear()
+    : compactLabel.format(start) + "\n– " + compactLabel.format(end);
   node("week-range").replaceChildren(el("span", "date-range-full", fullRange), el("span", "date-range-compact", compactRange));
-  const dateInput = node<HTMLInputElement>("date");
-  dateInput.value = startDate;
+  const dateInput = node<HTMLButtonElement>("date");
   dateInput.title = fullRange;
   dateInput.setAttribute("aria-description", fullRange);
 }
@@ -246,11 +250,7 @@ for (const period of ["daily", "weekly"] as const) {
     void load();
   };
 }
-const date = node<HTMLInputElement>("date");
-date.onchange = () => {
-  const [y, m, d] = date.value.split("-").map(Number);
-  if (y && m && d) goDate(new Date(y, m - 1, d));
-};
+const picker = installDatePicker(node<HTMLButtonElement>("date"), () => anchor, isDaily, goDate);
 const menu = node<HTMLButtonElement>("nav-toggle");
 const mast = menu.closest("header")!;
 function toggleMenu(open: boolean) {
@@ -288,6 +288,7 @@ window.addEventListener("hashchange", () => {
   if (view === "office" && route() !== "office") officeModule?.disposeOffice();
   view = route();
   if (dialog.open) dialog.close();
+  if (picker.open) picker.close();
   void load();
   focusMain();
 });
