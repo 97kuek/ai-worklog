@@ -15,13 +15,13 @@ import { renderCalendar } from "./calendar.js";
 import { renderBoard } from "./board.js";
 import { showTitle, editTaskTitle } from "./title-editor.js";
 import { renderDetail } from "./detail.js";
-import { renderClaudeUsage } from "./claude-usage.js";
-import type { AccountUsage } from "./claude-accounts.js";
+import { renderUsage } from "./usage.js";
+import type { AccountUsage } from "./accounts.js";
 import { renderStats } from "./stats.js";
 import { renderSettings, type RunnerSettings } from "./settings.js";
 import { renderSkills, type Skill } from "./skills.js";
 
-const pages = { log: "Work log", calendar: "Calendar", board: "Board", stats: "Activity", usage: "Claude usage", skills: "Skills", office: "Office", settings: "Settings" };
+const pages = { log: "Work log", calendar: "Calendar", board: "Board", stats: "Activity", usage: "Usage", skills: "Skills", office: "Office", settings: "Settings" };
 type View = keyof typeof pages;
 function node<T extends HTMLElement>(id: string) {
   return document.getElementById(id) as T;
@@ -261,9 +261,9 @@ async function load(done = "") {
       officeModule = module;
       module.renderOffice(root, data.sessions, showDetail);
     } else if (view === "usage") {
-      const data = await api<{ accounts: AccountUsage[] }>("/api/claude-usage", { signal: controller.signal });
+      const data = await api<{ accounts: AccountUsage[] }>("/api/usage", { signal: controller.signal });
       if (controller.signal.aborted) return;
-      renderClaudeUsage(root, data.accounts);
+      renderUsage(root, data.accounts);
     } else if (view === "settings") {
       const read = () => api<RunnerSettings>("/api/settings", { signal: controller.signal });
       const settings = await read();

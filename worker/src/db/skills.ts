@@ -1,13 +1,12 @@
-import { CLAUDE_ACCOUNTS, type ClaudeAccount } from "../../ui/claude-accounts";
-import { SKILL_TOOLS, type SkillInventory, type SkillTool } from "../domain/skills";
+import type { SkillInventory, SkillTool } from "../domain/skills";
 
-export async function replaceSkills(db: D1Database, machineId: string, { tools, skills, account }: SkillInventory) {
-  // A confirmed personal snapshot supersedes the old unscoped rows on this machine.
+export async function replaceSkills(db: D1Database, machineId: string, { tools, skills, account, primary }: SkillInventory) {
+  // A confirmed primary snapshot supersedes the old unscoped rows on this machine.
   // Work and legacy clients each replace only their own scope.
   const statements = [
     db.prepare(`DELETE FROM machine_skills WHERE machine_id = ? AND tool IN (${tools.map(() => "?").join(",")})
-      AND (account = ? OR (account = '' AND ? = 'p-claude'))`)
-      .bind(machineId, ...tools, account ?? "", account ?? ""),
+      AND (account = ? OR (account = '' AND ? = 1))`)
+      .bind(machineId, ...tools, account ?? "", primary ? 1 : 0),
   ];
   // D1 accepts at most 100 bound parameters per statement. One batch replaces the snapshot atomically.
   const chunkSize = 20;
@@ -22,19 +21,20 @@ export async function replaceSkills(db: D1Database, machineId: string, { tools, 
 }
 
 export async function listSkills(db: D1Database, userId: string) {
-  const { results } = await db.prepare(`SELECT s.name, s.description,
-      MAX(s.tool = 'claude_code') AS claude_code, MAX(s.tool = 'codex') AS codex,
-      json_group_array(DISTINCT s.account) FILTER (WHERE s.tool = 'claude_code') AS claude_accounts
+  const { results } = await db.prepare(`SELECT DISTINCT s.name, s.description, s.tool, s.account
     FROM machine_skills s JOIN machines m ON s.machine_id = m.id
-    WHERE m.user_id = ? GROUP BY s.name, s.description
-    ORDER BY s.name COLLATE NOCASE, s.name, s.description`)
-    .bind(userId).all<{ name: string; description: string; claude_accounts: string } & Record<SkillTool, number>>();
-  return results.map((row) => {
-    const reported: string[] = JSON.parse(row.claude_accounts);
-    const accounts: (ClaudeAccount | null)[] = CLAUDE_ACCOUNTS.filter(account => reported.includes(account));
-    if (reported.includes("")) accounts.push(null);
-    return {
-      name: row.name, description: row.description, tools: SKILL_TOOLS.filter(tool => row[tool] === 1), accounts,
-    };
-  });
+    WHERE m.user_id = ? ORDER BY s.name COLLATE NOCASE, s.name, s.description, s.tool, s.account = '', s.account`)
+    .bind(userId).all<{ name: string; description: string; tool: SkillTool; account: string }>();
+  type Entry = { name: string; description: string; tools: SkillTool[]; profiles: { tool: SkillTool; account: string | null }[] };
+  const skills: Entry[] = [];
+  for (const { name, description, tool, account } of results) {
+    let skill = skills.at(-1);
+    if (!skill || skill.name !== name || skill.description !== description) {
+      skill = { name, description, tools: [], profiles: [] };
+      skills.push(skill);
+    }
+    if (!skill.tools.includes(tool)) skill.tools.push(tool);
+    skill.profiles.push({ tool, account: account || null });
+  }
+  return skills;
 }

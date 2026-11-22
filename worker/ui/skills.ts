@@ -1,10 +1,9 @@
-import { CLAUDE_ACCOUNTS, type ClaudeAccount } from "./claude-accounts.js";
 import { filterMenu } from "./filter-menu.js";
 import { dataTable, el, engineName } from "./shared.js";
 
 export interface Skill {
   tools: ("claude_code" | "codex")[];
-  accounts?: (ClaudeAccount | null)[];
+  profiles: { tool: string; account: string | null }[];
   name: string;
   description: string;
 }
@@ -21,18 +20,20 @@ export function renderSkills(root: HTMLElement, skills: Skill[]) {
   const filter = filterMenu("skills-tool", "Filter by tool",
     [["", "All tools"], ["claude_code", engineName("claude_code")], ["codex", engineName("codex")]],
     root.querySelector<HTMLButtonElement>("#skills-tool")?.value ?? "", () => draw());
-  const accountFilter = filterMenu("skills-account", "Filter by Claude account",
-    [["", "All accounts"], ...CLAUDE_ACCOUNTS.map(account => [account, account] as const), ["unknown", "Unspecified"]],
+  const accounts = [...new Set(skills.flatMap(skill => skill.profiles.map(p => p.account)).filter((id): id is string => !!id))].sort();
+  const accountFilter = filterMenu("skills-account", "Filter by account",
+    [["", "All accounts"], ...accounts.map(account => [account, account] as const), ["@unspecified", "Unspecified"]],
     root.querySelector<HTMLButtonElement>("#skills-account")?.value ?? "", () => draw());
   function draw() {
     body.replaceChildren();
     for (const skill of skills) {
-      if (filter.trigger.value && !skill.tools.some(tool => tool === filter.trigger.value)) continue;
-      const accounts = skill.accounts ?? (skill.tools.includes("claude_code") ? [null] : []);
-      if (accountFilter.trigger.value && !accounts.some(account => (account ?? "unknown") === accountFilter.trigger.value)) continue;
+      const profiles = skill.profiles.filter(profile =>
+        (!filter.trigger.value || profile.tool === filter.trigger.value)
+        && (!accountFilter.trigger.value || (profile.account ?? "@unspecified") === accountFilter.trigger.value));
+      if (!profiles.length) continue;
       const row = body.insertRow();
-      row.insertCell().textContent = skill.tools.map(engineName).join(" / ");
-      row.insertCell().textContent = accounts.map(account => account ?? "Unspecified").join(" / ") || "—";
+      row.insertCell().textContent = [...new Set(profiles.map(p => engineName(p.tool)))].join(" / ");
+      row.insertCell().textContent = [...new Set(profiles.map(p => p.account ?? "—"))].join(" / ");
       row.insertCell().textContent = skill.name;
       row.insertCell().textContent = skill.description || "—";
     }
