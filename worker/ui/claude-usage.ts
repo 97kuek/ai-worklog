@@ -1,3 +1,4 @@
+import { duration } from "./activity.js";
 import { el } from "./shared.js";
 import { LIMIT_WINDOWS, type AccountUsage } from "./claude-accounts.js";
 
@@ -7,6 +8,11 @@ const localTime = new Intl.DateTimeFormat("en-US", { month: "short", day: "numer
 const windowLabels = { five_hour: "5-hour limit", seven_day: "7-day limit" };
 const percent = new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 });
 
+function resetLabel(epochSeconds: number, now: number) {
+  const reset = epochSeconds * 1000;
+  return "Resets in " + duration(reset - now) + " (" + localTime.format(reset) + ")";
+}
+
 function metric(list: HTMLElement, label: string, value: string) {
   const row = el("div");
   row.append(el("dt", "", label), el("dd", "", value));
@@ -14,6 +20,7 @@ function metric(list: HTMLElement, label: string, value: string) {
 }
 
 export function renderClaudeUsage(root: HTMLElement, accounts: AccountUsage[]) {
+  const now = Date.now();
   const grid = el("div", "usage-accounts");
   for (const account of accounts) {
     const panel = el("section", "stats-chart usage-panel");
@@ -26,7 +33,7 @@ export function renderClaudeUsage(root: HTMLElement, accounts: AccountUsage[]) {
     const limits = el("div", "usage-limits");
     for (const key of LIMIT_WINDOWS) {
       const limit = account[key];
-      const expired = limit?.resets_at != null && limit.resets_at * 1000 <= Date.now();
+      const expired = limit?.resets_at != null && limit.resets_at * 1000 <= now;
       const section = el("div");
       const heading = el("div", "stats-head");
       const remaining = limit && !expired ? Math.max(0, 100 - limit.used_percentage) : null;
@@ -38,7 +45,7 @@ export function renderClaudeUsage(root: HTMLElement, accounts: AccountUsage[]) {
         meter.value = remaining;
         meter.setAttribute("aria-label", windowLabels[key] + " remaining");
         section.append(meter);
-        section.append(el("div", "usage-caption", (limit.resets_at === null ? "" : "Resets " + localTime.format(limit.resets_at * 1000) + " · ")
+        section.append(el("div", "usage-caption", (limit.resets_at === null ? "" : resetLabel(limit.resets_at, now) + " · ")
           + "As of " + localTime.format(limit.observed_at)));
       } else if (expired) section.append(el("div", "usage-caption", "Window ended. Awaiting the next report."));
       limits.append(section);
@@ -53,5 +60,6 @@ export function renderClaudeUsage(root: HTMLElement, accounts: AccountUsage[]) {
       el("p", "usage-caption", "Last observation " + localTime.format(account.observed_at)));
     grid.append(panel);
   }
-  root.replaceChildren(grid);
+  const note = el("p", "usage-caption", "Limits update when Claude Code reports them. Costs are session estimates in USD.");
+  root.replaceChildren(grid, note);
 }
