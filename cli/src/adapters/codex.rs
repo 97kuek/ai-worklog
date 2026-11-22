@@ -72,6 +72,7 @@ struct TokenInfo {
 }
 
 #[derive(Deserialize, Serialize, Clone, Copy, Debug, Default)]
+#[serde(default)]
 pub struct Totals {
     #[serde(default)]
     input_tokens: u64,
@@ -114,6 +115,7 @@ pub enum CodexRole {
 
 /// 1つのrolloutファイルから読んだ分の途中結果。state ファイルに保存して続きから読むために使う
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CodexFileState {
     pub thread_id: Option<String>,
     /// 最初の session_meta で決まる

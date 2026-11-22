@@ -1,0 +1,837 @@
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs::{File, OpenOptions, TryLockError};
+use std::io;
+use std::path::{Path, PathBuf};
+
+use serde::Serialize;
+
+use super::payload::{chunk, session_fingerprint, to_ingest_json, ChunkLimits, Outgoing};
+use super::state::{FileEntry, State};
+use crate::adapters::claude::{list_claude_files, merge_claude, read_claude_file, ClaudeFile, ClaudeFileState};
+use crate::adapters::codex::{list_codex_files, merge_codex, read_codex_file, read_thread_titles, CodexFileState, CodexRole};
+use crate::adapters::http::{SendError, Sender};
+use crate::adapters::jsonl::{stat, FileId};
+use crate::adapters::namer::{build_material, Namer};
+use crate::domain::{build_session, Millis, Session};
+
+/// これだけ名付けに失敗したら、それ以降は試さない
+const MAX_NAME_ATTEMPTS: u8 = 2;
+/// エラーに残す、拒否されたときの応答本文の長さ
+const MAX_ERROR_BODY_CHARS: usize = 200;
+
+pub struct CollectOptions<'a> {
+    pub claude_projects_dir: PathBuf,
+    pub codex_dir: PathBuf,
+    pub machine_name: String,
+    pub gap_minutes: i64,
+    pub now: Millis,
+    pub naming: Option<(&'a dyn Namer, usize /*min_user_messages*/, usize /*max_per_run*/)>,
+    pub chunk: ChunkLimits,
+}
+
+#[derive(Debug, Default, PartialEq, Serialize)]
+pub struct CollectReport {
+    pub bytes_read: u64,
+    pub files_read: usize,
+    pub sessions_changed: usize,
+    pub sessions_sent: usize,
+    pub chunks_failed: usize,
+    pub names_assigned: usize,
+    pub auth_failed: bool,
+    pub errors: Vec<String>,
+}
+
+/// ログを前回の続きから読み、セッションを組み立て直し、名前を付け、
+/// 送った内容から変わったセッションだけを小分けにして送る。
+/// state は呼び出し側が load して渡し、終わったら save する
+pub fn collect(opts: &CollectOptions, state: &mut State, sender: &dyn Sender) -> CollectReport {
+    let mut report = CollectReport::default();
+    report.errors.extend(state.load_error.take());
+    let gap_ms = opts.gap_minutes.saturating_mul(60_000);
+
+    read_new_lines(opts, state, &mut report);
+    let built = build_sessions(opts, state, gap_ms);
+    if let Some((namer, min_user_messages, max_per_run)) = opts.naming {
+        let rule = NamingRule { min_user_messages, max_per_run, now: opts.now, gap_ms };
+        name_sessions(namer, &rule, state, &built, &mut report);
+    }
+    forget_user_texts(state);
+    send_changed(opts, state, &built, sender, &mut report);
+    report
+}
+
+/// ~/.ai-worklog/collect.lock を try_lock する。取れなければ None
+pub fn acquire_lock(home: &Path) -> io::Result<Option<File>> {
+    std::fs::create_dir_all(home)?;
+    let file = OpenOptions::new().create(true).truncate(false).write(true).open(home.join("collect.lock"))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(TryLockError::Error(e)) => Err(e),
+    }
+}
+
+enum Source {
+    Claude { session_id: String, is_main: bool },
+    Codex,
+}
+
+fn file_key(id: FileId) -> String {
+    format!("{}:{}", id.dev, id.ino)
+}
+
+impl FileEntry {
+    fn is_from(&self, source: &Source) -> bool {
+        match (source, &self.claude, &self.codex) {
+            (Source::Claude { session_id, is_main }, Some((id, main, _)), None) => id == session_id && main == is_main,
+            (Source::Codex, None, Some(_)) => true,
+            _ => false,
+        }
+    }
+
+    fn reset(&mut self, source: &Source) {
+        self.offset = 0;
+        self.claude = None;
+        self.codex = None;
+        match source {
+            Source::Claude { session_id, is_main } => {
+                self.claude = Some((session_id.clone(), *is_main, ClaudeFileState::default()));
+            }
+            Source::Codex => self.codex = Some(CodexFileState::default()),
+        }
+    }
+
+    /// offset から読む。読み終えるまで途中結果を書き換えない（読み損ねた行を二重に数えないため）
+    fn read_more(&mut self, source: &Source) -> io::Result<u64> {
+        match (source, &mut self.claude, &mut self.codex) {
+            (Source::Claude { session_id, is_main }, Some((_, _, st)), _) => {
+                let file = ClaudeFile { path: self.path.clone(), session_id: session_id.clone(), is_main: *is_main };
+                let mut next = st.clone();
+                let end = read_claude_file(&file, self.offset, &mut next)?;
+                *st = next;
+                Ok(end)
+            }
+            (Source::Codex, _, Some(st)) => {
+                let mut next = st.clone();
+                let end = read_codex_file(&self.path, self.offset, &mut next)?;
+                *st = next;
+                Ok(end)
+            }
+            _ => Ok(self.offset),
+        }
+    }
+
+    /// user_texts を持つファイル（Claude と Codex の main）が属するセッションのキー
+    fn main_session_key(&self) -> Option<String> {
+        if let Some((id, true, _)) = &self.claude {
+            return Some(format!("claude_code:{id}"));
+        }
+        let st = self.codex.as_ref()?;
+        match (&st.role, &st.thread_id) {
+            (Some(CodexRole::Main), Some(id)) => Some(format!("codex:{id}")),
+            _ => None,
+        }
+    }
+}
+
+/// 全ファイルを列挙し、FileId で状態を引いて、増えた分だけ読む
+fn read_new_lines(opts: &CollectOptions, state: &mut State, report: &mut CollectReport) {
+    let mut listed: Vec<(PathBuf, Source)> = list_claude_files(&opts.claude_projects_dir)
+        .into_iter()
+        .map(|f| (f.path, Source::Claude { session_id: f.session_id, is_main: f.is_main }))
+        .collect();
+    listed.extend(list_codex_files(&opts.codex_dir).into_iter().map(|p| (p, Source::Codex)));
+
+    // 前回の実行で各パスにあった FileId
+    let previous: HashMap<PathBuf, String> = state.files.iter().map(|(k, e)| (e.path.clone(), k.clone())).collect();
+    let mut present = HashSet::new();
+    for (path, source) in listed {
+        let st = match stat(&path) {
+            Ok(st) => st,
+            Err(e) => {
+                report.errors.push(format!("cannot stat {}: {e}", path.display()));
+                continue;
+            }
+        };
+        let key = file_key(st.id);
+        // 同じパスが別の FileId になった：置き換えられたので古い途中結果を捨てる
+        if let Some(old) = previous.get(&path).filter(|old| **old != key)
+            && state.files.get(old).is_some_and(|e| e.path == path)
+        {
+            state.files.remove(old);
+        }
+        present.insert(key.clone());
+        let entry = state.files.entry(key).or_default();
+        // 同じ FileId で別のパス：rename（Codex のアーカイブなど）。続きから読む
+        entry.path = path;
+        if !entry.is_from(&source) || st.len < entry.offset {
+            entry.reset(&source);
+        }
+        if st.len == entry.offset {
+            continue;
+        }
+        let from = entry.offset;
+        match entry.read_more(&source) {
+            Ok(end) => {
+                if end > from {
+                    report.files_read += 1;
+                    report.bytes_read += end - from;
+                }
+                entry.offset = end;
+            }
+            Err(e) => report.errors.push(format!("cannot read {}: {e}", entry.path.display())),
+        }
+    }
+    // 消えたファイルの途中結果は持ち続けない
+    state.files.retain(|k, _| present.contains(k));
+}
+
+struct Built {
+    key: String,
+    session: Session,
+    /// 名付けの材料。送らない
+    user_texts: Vec<String>,
+}
+
+/// ファイルごとの途中結果をセッションごとにまとめ、ブロックを作る。started_at の順
+fn build_sessions(opts: &CollectOptions, state: &State, gap_ms: i64) -> Vec<Built> {
+    let mut out = Vec::new();
+
+    // Claude：session_id ごとに main とサブエージェント
+    type Group<'a> = (Option<(u64, &'a ClaudeFileState)>, Vec<&'a ClaudeFileState>);
+    let mut claude: BTreeMap<&str, Group> = BTreeMap::new();
+    for e in state.files.values() {
+        let Some((id, is_main, st)) = &e.claude else { continue };
+        let group = claude.entry(id.as_str()).or_default();
+        if !is_main {
+            group.1.push(st);
+        } else if group.0.is_none_or(|(offset, _)| e.offset > offset) {
+            group.0 = Some((e.offset, st));
+        }
+    }
+    for (id, (main, subs)) in claude {
+        let Some((_, main)) = main else { continue };
+        let Some(session) = merge_claude(Some(main), &subs).and_then(|raw| build_session(raw, gap_ms)) else { continue };
+        out.push(Built { key: format!("claude_code:{id}"), session, user_texts: main.user_texts.clone() });
+    }
+
+    // Codex：同じ thread_id のファイルが2つあれば（move でなく copy）、読み進んだ方だけ使う
+    let mut threads: BTreeMap<&str, (u64, &CodexFileState)> = BTreeMap::new();
+    for e in state.files.values() {
+        let Some(st) = &e.codex else { continue };
+        let Some(id) = st.thread_id.as_deref() else { continue };
+        if threads.get(id).is_none_or(|(offset, _)| e.offset > *offset) {
+            threads.insert(id, (e.offset, st));
+        }
+    }
+    let files: Vec<&CodexFileState> = threads.values().map(|(_, st)| *st).collect();
+    for raw in merge_codex(&files, &read_thread_titles(&opts.codex_dir)) {
+        let user_texts = threads.get(raw.native_session_id.as_str()).map(|(_, st)| st.user_texts.clone()).unwrap_or_default();
+        let key = format!("codex:{}", raw.native_session_id);
+        let Some(session) = build_session(raw, gap_ms) else { continue };
+        out.push(Built { key, session, user_texts });
+    }
+
+    out.sort_by(|a, b| a.session.started_at.cmp(&b.session.started_at).then_with(|| a.key.cmp(&b.key)));
+    out
+}
+
+struct NamingRule {
+    min_user_messages: usize,
+    max_per_run: usize,
+    now: Millis,
+    gap_ms: i64,
+}
+
+/// 名前がなく、試した回数が上限未満で、材料が十分あるか止まっているセッションを、
+/// 1回に max_per_run 件まで名付ける
+fn name_sessions(namer: &dyn Namer, rule: &NamingRule, state: &mut State, built: &[Built], report: &mut CollectReport) {
+    let mut tried = 0;
+    for b in built {
+        if tried >= rule.max_per_run {
+            break;
+        }
+        let entry = state.sessions.entry(b.key.clone()).or_default();
+        if entry.title.is_some() || entry.name_attempts >= MAX_NAME_ATTEMPTS {
+            continue;
+        }
+        let idle = rule.now - b.session.ended_at >= rule.gap_ms;
+        if b.user_texts.len() < rule.min_user_messages && !idle {
+            continue;
+        }
+        let material = build_material(b.session.source_title.as_deref(), &b.user_texts);
+        if material.is_empty() {
+            continue;
+        }
+        tried += 1;
+        entry.name_attempts += 1;
+        if let Some(title) = namer.name(&material) {
+            entry.title = Some(title);
+            report.names_assigned += 1;
+        }
+    }
+}
+
+/// 名付けが済んだか、あきらめたセッションの材料を状態から消す
+fn forget_user_texts(state: &mut State) {
+    let sessions = &state.sessions;
+    let done = |key: &str| sessions.get(key).is_some_and(|s| s.title.is_some() || s.name_attempts >= MAX_NAME_ATTEMPTS);
+    for e in state.files.values_mut() {
+        if !e.main_session_key().is_some_and(|k| done(&k)) {
+            continue;
+        }
+        if let Some((_, _, st)) = &mut e.claude {
+            st.user_texts.clear();
+        }
+        if let Some(st) = &mut e.codex {
+            st.user_texts.clear();
+        }
+    }
+}
+
+/// 送った内容から変わったセッションを小分けにして送る。成功した小分けだけ送った印を付ける
+fn send_changed(opts: &CollectOptions, state: &mut State, built: &[Built], sender: &dyn Sender, report: &mut CollectReport) {
+    let targets: Vec<(&Built, Option<String>, u64)> = built
+        .iter()
+        .filter_map(|b| {
+            let entry = state.sessions.get(&b.key);
+            let title = entry.and_then(|e| e.title.clone());
+            let fp = session_fingerprint(&Outgoing { session: &b.session, title: title.as_deref() });
+            (entry.and_then(|e| e.sent_fingerprint) != Some(fp)).then_some((b, title, fp))
+        })
+        .collect();
+    report.sessions_changed = targets.len();
+
+    let blocks: Vec<usize> = targets.iter().map(|(b, _, _)| b.session.blocks.len()).collect();
+    for range in chunk(&blocks, &opts.chunk) {
+        let part = &targets[range];
+        let items: Vec<Outgoing> =
+            part.iter().map(|(b, title, _)| Outgoing { session: &b.session, title: title.as_deref() }).collect();
+        match sender.send(&to_ingest_json(&opts.machine_name, &items)) {
+            Ok(_) => {
+                for (b, _, fp) in part {
+                    state.sessions.entry(b.key.clone()).or_default().sent_fingerprint = Some(*fp);
+                }
+                report.sessions_sent += part.len();
+            }
+            Err(SendError::Auth(status)) => {
+                report.auth_failed = true;
+                report.errors.push(format!("authentication failed (HTTP {status}); stopped sending"));
+                break;
+            }
+            Err(e) => {
+                report.chunks_failed += 1;
+                report.errors.push(describe(&e, part.len()));
+            }
+        }
+    }
+}
+
+fn describe(e: &SendError, sessions: usize) -> String {
+    let what = match e {
+        SendError::Auth(status) => format!("authentication failed (HTTP {status})"),
+        SendError::Rejected { status, body } => {
+            let body: String = body.chars().take(MAX_ERROR_BODY_CHARS).collect();
+            format!("rejected (HTTP {status}): {body}")
+        }
+        SendError::Server(status) => format!("server error (HTTP {status})"),
+        SendError::Network(msg) => format!("network error: {msg}"),
+    };
+    format!("chunk of {sessions} sessions not sent: {what}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
+    use std::io::Write;
+
+    use serde_json::Value;
+
+    use crate::adapters::http::{SendError, SendOk};
+    use crate::adapters::time::parse_ts;
+    use crate::app::payload::{to_ingest_json, Outgoing, DEFAULT_CHUNK};
+    use crate::app::scan::{scan, ScanOptions};
+    use crate::app::state;
+
+    const MACHINE: &str = "test-mac";
+
+    fn ts(s: &str) -> Millis {
+        parse_ts(s).unwrap()
+    }
+
+    /// 計画1のフィクスチャを一時フォルダに複製したもの。Drop で消す
+    struct Env {
+        root: PathBuf,
+    }
+
+    impl Env {
+        fn new(test: &str) -> Env {
+            let root = std::env::temp_dir().join(format!("aiwl-collect-{test}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            copy_dir(&Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures"), &root);
+            Env { root }
+        }
+        fn claude(&self) -> PathBuf {
+            self.root.join("claude/projects")
+        }
+        fn codex(&self) -> PathBuf {
+            self.root.join("codex")
+        }
+        fn s1(&self) -> PathBuf {
+            self.claude().join("-tmp-demo/s1.jsonl")
+        }
+        fn opts<'a>(&self, now: Millis, naming: Option<(&'a dyn Namer, usize, usize)>, chunk: ChunkLimits) -> CollectOptions<'a> {
+            CollectOptions {
+                claude_projects_dir: self.claude(),
+                codex_dir: self.codex(),
+                machine_name: MACHINE.into(),
+                gap_minutes: 30,
+                now,
+                naming,
+                chunk,
+            }
+        }
+        fn plain(&self) -> CollectOptions<'static> {
+            self.opts(ts("2026-11-22T00:00:00.000Z"), None, ChunkLimits { ..DEFAULT_CHUNK })
+        }
+    }
+
+    impl Drop for Env {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn copy_dir(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for e in std::fs::read_dir(from).unwrap() {
+            let e = e.unwrap();
+            let target = to.join(e.file_name());
+            if e.file_type().unwrap().is_dir() {
+                copy_dir(&e.path(), &target);
+            } else {
+                std::fs::copy(e.path(), target).unwrap();
+            }
+        }
+    }
+
+    fn append(path: &Path, text: &str) {
+        std::fs::OpenOptions::new().append(true).open(path).unwrap().write_all(text.as_bytes()).unwrap();
+    }
+
+    /// s1 の書きかけの最後の行を閉じ、本文のある user 行を足す
+    fn append_user_line(path: &Path, at: &str, text: &str) {
+        append(
+            path,
+            &format!("\n{{\"type\":\"user\",\"timestamp\":\"{at}\",\"sessionId\":\"s1\",\"message\":{{\"role\":\"user\",\"content\":\"{text}\"}}}}\n"),
+        );
+    }
+
+    struct FakeSender {
+        bodies: RefCell<Vec<String>>,
+        script: RefCell<VecDeque<Result<SendOk, SendError>>>,
+    }
+
+    impl FakeSender {
+        fn ok() -> FakeSender {
+            FakeSender::with(vec![])
+        }
+        /// 決めた結果を順に返す。尽きたら成功
+        fn with(results: Vec<Result<SendOk, SendError>>) -> FakeSender {
+            FakeSender { bodies: RefCell::new(vec![]), script: RefCell::new(results.into()) }
+        }
+        fn calls(&self) -> usize {
+            self.bodies.borrow().len()
+        }
+        fn sessions(&self, from_call: usize) -> Vec<Value> {
+            self.bodies.borrow()[from_call..]
+                .iter()
+                .flat_map(|b| {
+                    let v: Value = serde_json::from_str(b).unwrap();
+                    assert_eq!(v["machine_name"], MACHINE);
+                    v["sessions"].as_array().unwrap().clone()
+                })
+                .collect()
+        }
+        fn ids(&self, from_call: usize) -> Vec<String> {
+            self.sessions(from_call).iter().map(|s| s["native_session_id"].as_str().unwrap().to_owned()).collect()
+        }
+    }
+
+    impl Sender for FakeSender {
+        fn send(&self, body: &str) -> Result<SendOk, SendError> {
+            self.bodies.borrow_mut().push(body.to_owned());
+            self.script.borrow_mut().pop_front().unwrap_or(Ok(SendOk { sessions: 0, blocks: 0, rows_changed: 0 }))
+        }
+    }
+
+    struct FakeNamer {
+        name: Option<String>,
+        calls: Cell<usize>,
+        materials: RefCell<Vec<String>>,
+    }
+
+    impl FakeNamer {
+        fn new(name: Option<&str>) -> FakeNamer {
+            FakeNamer { name: name.map(str::to_owned), calls: Cell::new(0), materials: RefCell::new(vec![]) }
+        }
+    }
+
+    impl Namer for FakeNamer {
+        fn name(&self, material: &str) -> Option<String> {
+            self.calls.set(self.calls.get() + 1);
+            self.materials.borrow_mut().push(material.to_owned());
+            self.name.clone()
+        }
+    }
+
+    fn session<'a>(sessions: &'a [Value], id: &str) -> &'a Value {
+        sessions.iter().find(|s| s["native_session_id"] == id).unwrap_or_else(|| panic!("{id} not sent"))
+    }
+
+    fn user_texts_of(state: &State, session_id: &str) -> Vec<String> {
+        state
+            .files
+            .values()
+            .filter_map(|e| e.claude.as_ref())
+            .filter(|(id, is_main, _)| id == session_id && *is_main)
+            .flat_map(|(_, _, st)| st.user_texts.clone())
+            .collect()
+    }
+
+    #[test]
+    fn first_run_sends_every_session() {
+        let env = Env::new("first_run");
+        let sender = FakeSender::ok();
+        let mut st = State::default();
+        let report = collect(&env.plain(), &mut st, &sender);
+
+        let scanned = scan(&ScanOptions {
+            claude_projects_dir: env.claude(),
+            codex_dir: env.codex(),
+            since_days: 36500,
+            gap_minutes: 30,
+            now: ts("2026-11-22T00:00:00.000Z"),
+        });
+        let items: Vec<Outgoing> = scanned.iter().map(|s| Outgoing { session: s, title: None }).collect();
+        let want: Value = serde_json::from_str(&to_ingest_json(MACHINE, &items)).unwrap();
+        assert_eq!(Value::Array(sender.sessions(0)), want["sessions"]);
+        assert_eq!(sender.ids(0), ["s1", "c1", "s2"]);
+
+        for body in sender.bodies.borrow().iter() {
+            for secret in ["source_title", "デモ作業", "Codex task", "again"] {
+                assert!(!body.contains(secret), "{secret} was sent");
+            }
+        }
+        assert_eq!(report.files_read, 7);
+        assert!(report.bytes_read > 0);
+        assert_eq!((report.sessions_changed, report.sessions_sent, report.chunks_failed), (3, 3, 0));
+        assert!(!report.auth_failed);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+    }
+
+    #[test]
+    fn second_run_reads_nothing_and_sends_nothing() {
+        let env = Env::new("second_run");
+        let sender = FakeSender::ok();
+        let mut st = State::default();
+        collect(&env.plain(), &mut st, &sender);
+        let calls = sender.calls();
+        assert!(calls > 0);
+
+        let report = collect(&env.plain(), &mut st, &sender);
+        assert_eq!(report.bytes_read, 0);
+        assert_eq!(report.files_read, 0);
+        assert_eq!(sender.calls(), calls);
+        assert_eq!(report, CollectReport::default());
+    }
+
+    #[test]
+    fn state_saved_and_loaded_resumes_without_resending() {
+        let env = Env::new("round_trip");
+        let path = env.root.join("home/state.json");
+        let sender = FakeSender::ok();
+        let mut st = State::default();
+        collect(&env.plain(), &mut st, &sender);
+        state::save(&path, &st).unwrap();
+        let calls = sender.calls();
+
+        let mut back = state::load(&path);
+        assert_eq!(back.load_error, None);
+        let report = collect(&env.plain(), &mut back, &sender);
+        assert_eq!(report.bytes_read, 0);
+        assert_eq!(sender.calls(), calls);
+        assert_eq!(report, CollectReport::default());
+    }
+
+    #[test]
+    fn corrupt_state_is_reported_and_everything_is_sent_again() {
+        let env = Env::new("corrupt_state");
+        let path = env.root.join("home/state.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "garbage").unwrap();
+        let sender = FakeSender::ok();
+        let mut st = state::load(&path);
+        let report = collect(&env.plain(), &mut st, &sender);
+        assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+        assert_eq!(sender.ids(0), ["s1", "c1", "s2"]);
+        assert_eq!(st.load_error, None);
+    }
+
+    #[test]
+    fn appended_lines_resend_only_that_session() {
+        let env = Env::new("appended");
+        let sender = FakeSender::ok();
+        let mut st = State::default();
+        collect(&env.plain(), &mut st, &sender);
+        let calls = sender.calls();
+
+        append_user_line(&env.s1(), "2026-11-20T03:05:00.000Z", "more");
+        let report = collect(&env.plain(), &mut st, &sender);
+        assert_eq!(sender.ids(calls), ["s1"]);
+        assert_eq!(report.files_read, 1);
+        assert!(report.bytes_read > 0);
+        assert_eq!((report.sessions_changed, report.sessions_sent), (1, 1));
+        // 書きかけだった 03:00 の行と、足した 03:05 の行が入る
+        assert_eq!(session(&sender.sessions(calls), "s1")["ended_at"], "2026-11-20T03:05:00.000Z");
+    }
+
+    #[test]
+    fn failed_chunk_is_retried_next_run() {
+        let env = Env::new("failed_chunk");
+        let limits = || ChunkLimits { max_sessions: 2, max_blocks: 100 };
+        let opts = env.opts(ts("2026-11-22T00:00:00.000Z"), None, limits());
+        let sender = FakeSender::with(vec![Err(SendError::Server(500))]);
+        let mut st = State::default();
+
+        let first = collect(&opts, &mut st, &sender);
+        assert_eq!(sender.calls(), 2); // [s1, c1] は失敗、[s2] は成功
+        assert_eq!(first.chunks_failed, 1);
+        assert_eq!((first.sessions_changed, first.sessions_sent), (3, 1));
+        assert_eq!(first.errors.len(), 1);
+        assert!(!first.auth_failed);
+        assert_eq!(st.sessions.get("claude_code:s1").and_then(|s| s.sent_fingerprint), None);
+        assert!(st.sessions["claude_code:s2"].sent_fingerprint.is_some());
+
+        let second = collect(&opts, &mut st, &sender);
+        assert_eq!(sender.ids(2), ["s1", "c1"]);
+        assert_eq!(second.chunks_failed, 0);
+        assert_eq!(second.bytes_read, 0);
+        assert_eq!((second.sessions_changed, second.sessions_sent), (2, 2));
+
+        let third = collect(&opts, &mut st, &sender);
+        assert_eq!(sender.calls(), 3);
+        assert_eq!(third, CollectReport::default());
+    }
+
+    #[test]
+    fn auth_failure_stops_sending_and_is_reported() {
+        let env = Env::new("auth");
+        let opts = env.opts(ts("2026-11-22T00:00:00.000Z"), None, ChunkLimits { max_sessions: 1, max_blocks: 100 });
+        let sender = FakeSender::with(vec![Err(SendError::Auth(302))]);
+        let mut st = State::default();
+        let report = collect(&opts, &mut st, &sender);
+        assert!(report.auth_failed);
+        assert_eq!(sender.calls(), 1);
+        assert_eq!(report.sessions_sent, 0);
+        assert_eq!(report.errors.len(), 1);
+        assert!(report.errors[0].contains("302"), "{:?}", report.errors);
+        assert!(st.sessions.values().all(|s| s.sent_fingerprint.is_none()));
+
+        // 次の回は3つとも送る
+        let again = collect(&opts, &mut st, &sender);
+        assert_eq!(sender.ids(1), ["s1", "c1", "s2"]);
+        assert_eq!(again.sessions_sent, 3);
+    }
+
+    #[test]
+    fn names_after_enough_user_messages() {
+        let env = Env::new("names_enough");
+        append_user_line(&env.s1(), "2026-11-20T03:10:00.000Z", "third");
+        let namer = FakeNamer::new(Some("デモの改修"));
+        // どのセッションも最後の活動から gap_minutes 経っていない時刻
+        let now = ts("2026-11-20T03:11:00.000Z");
+        let opts = env.opts(now, Some((&namer, 3, 5)), ChunkLimits { ..DEFAULT_CHUNK });
+        let sender = FakeSender::ok();
+        let mut st = State::default();
+
+        let report = collect(&opts, &mut st, &sender);
+        assert_eq!(namer.calls.get(), 1);
+        assert_eq!(report.names_assigned, 1);
+        let material = namer.materials.borrow()[0].clone();
+        for text in ["デモ作業", "hi", "again", "third"] {
+            assert!(material.contains(text), "{text} missing from {material}");
+        }
+        let sent = sender.sessions(0);
+        assert_eq!(session(&sent, "s1")["title"], "デモの改修");
+        assert_eq!(session(&sent, "s2")["title"], Value::Null);
+        assert_eq!(st.sessions["claude_code:s1"].title.as_deref(), Some("デモの改修"));
+        assert!(user_texts_of(&st, "s1").is_empty());
+        assert_eq!(user_texts_of(&st, "s2"), ["x"]);
+        for body in sender.bodies.borrow().iter() {
+            assert!(!body.contains("third") && !body.contains("again"));
+        }
+
+        // 次の回は Namer を呼ばない。名前付けの後に足された発言も状態に残さない
+        append_user_line(&env.s1(), "2026-11-20T03:12:00.000Z", "fourth");
+        let calls = sender.calls();
+        collect(&opts, &mut st, &sender);
+        assert_eq!(namer.calls.get(), 1);
+        assert!(user_texts_of(&st, "s1").is_empty());
+        assert_eq!(session(&sender.sessions(calls), "s1")["title"], "デモの改修");
+    }
+
+    #[test]
+    fn names_idle_sessions_with_fewer_messages() {
+        // s2 は材料が1件。最後の活動 (2026-11-21T00:00) から10分しか経っていなければ名付けない
+        let env = Env::new("names_idle");
+        let namer = FakeNamer::new(Some("別の作業"));
+        let busy = env.opts(ts("2026-11-21T00:10:00.000Z"), Some((&namer, 3, 10)), ChunkLimits { ..DEFAULT_CHUNK });
+        let mut st = State::default();
+        collect(&busy, &mut st, &FakeSender::ok());
+        assert_eq!(st.sessions["claude_code:s2"].title, None);
+        assert_eq!(st.sessions["claude_code:s2"].name_attempts, 0);
+        assert_eq!(user_texts_of(&st, "s2"), ["x"]);
+
+        // gap_minutes を過ぎたら名付ける
+        let idle = env.opts(ts("2026-11-21T00:31:00.000Z"), Some((&namer, 3, 10)), ChunkLimits { ..DEFAULT_CHUNK });
+        let sender = FakeSender::ok();
+        collect(&idle, &mut st, &sender);
+        assert_eq!(st.sessions["claude_code:s2"].title.as_deref(), Some("別の作業"));
+        assert_eq!(session(&sender.sessions(0), "s2")["title"], "別の作業");
+        assert!(user_texts_of(&st, "s2").is_empty());
+    }
+
+    #[test]
+    fn naming_is_capped_per_run_and_retried_twice() {
+        let env = Env::new("naming_capped");
+        let namer = FakeNamer::new(None);
+        // 1件でも材料があれば名付けの対象。s1, c1, s2 の3セッション
+        let opts = env.opts(ts("2026-11-22T00:00:00.000Z"), Some((&namer, 1, 1)), ChunkLimits { ..DEFAULT_CHUNK });
+        let sender = FakeSender::ok();
+        let mut st = State::default();
+
+        let first = collect(&opts, &mut st, &sender);
+        assert_eq!(namer.calls.get(), 1);
+        assert_eq!(first.names_assigned, 0);
+        // 名前がなくても送る
+        assert_eq!(sender.ids(0), ["s1", "c1", "s2"]);
+        assert!(sender.sessions(0).iter().all(|s| s["title"].is_null()));
+
+        for run in 2..=6 {
+            collect(&opts, &mut st, &sender);
+            assert_eq!(namer.calls.get(), run, "run {run}");
+        }
+        collect(&opts, &mut st, &sender);
+        collect(&opts, &mut st, &sender);
+        assert_eq!(namer.calls.get(), 6);
+        for key in ["claude_code:s1", "codex:c1", "claude_code:s2"] {
+            assert_eq!(st.sessions[key].name_attempts, 2, "{key}");
+            assert_eq!(st.sessions[key].title, None, "{key}");
+        }
+        assert!(user_texts_of(&st, "s1").is_empty());
+        assert!(user_texts_of(&st, "s2").is_empty());
+        // 名前が付かないままなので、送り直さない
+        assert_eq!(sender.calls(), 1);
+    }
+
+    #[test]
+    fn truncated_file_is_read_again_from_start() {
+        let env = Env::new("truncated");
+        let sender = FakeSender::ok();
+        let mut st = State::default();
+        collect(&env.plain(), &mut st, &sender);
+        let calls = sender.calls();
+
+        // 同じファイル（同じ inode）を短く書き直す
+        let text = std::fs::read_to_string(env.s1()).unwrap();
+        let short: String = text.lines().take(3).map(|l| format!("{l}\n")).collect();
+        std::fs::write(env.s1(), &short).unwrap();
+        let report = collect(&env.plain(), &mut st, &sender);
+        assert_eq!(report.bytes_read, short.len() as u64);
+        assert_eq!(sender.ids(calls), ["s1"]);
+
+        // 何も読んでいない状態から全部読んだときと同じ
+        let fresh = FakeSender::ok();
+        collect(&env.plain(), &mut State::default(), &fresh);
+        assert_eq!(session(&sender.sessions(calls), "s1"), session(&fresh.sessions(0), "s1"));
+    }
+
+    #[test]
+    fn replaced_file_drops_its_old_state() {
+        let env = Env::new("replaced");
+        let sender = FakeSender::ok();
+        let mut st = State::default();
+        collect(&env.plain(), &mut st, &sender);
+        let calls = sender.calls();
+        let files = st.files.len();
+
+        // 別の内容を書いた新しいファイルで置き換える（inode が変わる）
+        let s2 = env.claude().join("-tmp-demo/s2.jsonl");
+        let tmp = env.claude().join("-tmp-demo/s2.new");
+        std::fs::write(
+            &tmp,
+            "{\"type\":\"user\",\"timestamp\":\"2026-11-21T05:00:00.000Z\",\"sessionId\":\"s2\",\"cwd\":\"/tmp/other\",\"message\":{\"role\":\"user\",\"content\":\"y\"}}\n",
+        )
+        .unwrap();
+        std::fs::rename(&tmp, &s2).unwrap();
+        collect(&env.plain(), &mut st, &sender);
+        assert_eq!(st.files.len(), files);
+        let sent = sender.sessions(calls);
+        assert_eq!(sender.ids(calls), ["s2"]);
+        // 古い 00:00 の活動は残らない
+        assert_eq!(session(&sent, "s2")["started_at"], "2026-11-21T05:00:00.000Z");
+        assert_eq!(session(&sent, "s2")["blocks"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn archived_codex_file_is_not_double_counted() {
+        let env = Env::new("archived");
+        let sender = FakeSender::ok();
+        let mut st = State::default();
+        collect(&env.plain(), &mut st, &sender);
+        let calls = sender.calls();
+        let files = st.files.len();
+
+        let archived = env.codex().join("archived_sessions");
+        std::fs::create_dir_all(&archived).unwrap();
+        std::fs::rename(env.codex().join("sessions/2026/11/20/rollout-a.jsonl"), archived.join("rollout-a.jsonl")).unwrap();
+        let report = collect(&env.plain(), &mut st, &sender);
+        assert_eq!(sender.calls(), calls);
+        assert_eq!(report, CollectReport::default());
+        assert_eq!(st.files.len(), files);
+        assert!(st.files.values().any(|e| e.path == archived.join("rollout-a.jsonl")));
+    }
+
+    #[test]
+    fn copied_codex_file_is_not_double_counted() {
+        let env = Env::new("copied");
+        let sender = FakeSender::ok();
+        let mut st = State::default();
+        collect(&env.plain(), &mut st, &sender);
+        let calls = sender.calls();
+
+        // move ではなく copy（inode が変わる）。元も残っている
+        let archived = env.codex().join("archived_sessions");
+        std::fs::create_dir_all(&archived).unwrap();
+        std::fs::copy(env.codex().join("sessions/2026/11/20/rollout-a.jsonl"), archived.join("rollout-a.jsonl")).unwrap();
+        let report = collect(&env.plain(), &mut st, &sender);
+        assert_eq!(report.files_read, 1);
+        assert_eq!(sender.calls(), calls);
+        assert_eq!(report.sessions_changed, 0);
+    }
+
+    #[test]
+    fn second_run_exits_when_locked() {
+        let env = Env::new("locked");
+        let home = env.root.join("home");
+        let first = acquire_lock(&home).unwrap();
+        assert!(first.is_some());
+        assert!(home.join("collect.lock").exists());
+        assert!(acquire_lock(&home).unwrap().is_none());
+        drop(first);
+        assert!(acquire_lock(&home).unwrap().is_some());
+    }
+}
