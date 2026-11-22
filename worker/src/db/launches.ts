@@ -1,3 +1,5 @@
+import { completedBoardWindow } from "../../ui/board-retention";
+
 export const ONLINE_FOR = 2 * 60_000;
 const CLAIM_WITHIN = 10 * 60_000;
 
@@ -36,7 +38,8 @@ export async function listRequests(db: D1Database, user: string, now: number) {
       ) END AS wait_reason,
       j.attempt_id,j.state,j.error,j.state_since
     FROM board_requests r ${latestQueueLaunch}
-    WHERE r.user_id=? ORDER BY r.queue_position,r.updated_at,r.id`).bind(now - CLAIM_WITHIN, user, now - ONLINE_FOR, user).all<{
+    WHERE r.user_id=? AND (j.state IS NOT 'completed' OR j.state_since>?)
+    ORDER BY r.queue_position,r.updated_at,r.id`).bind(now - CLAIM_WITHIN, user, now - ONLINE_FOR, user, now - completedBoardWindow).all<{
       id: string; title: string; stage: string; engine: string | null; model: string | null;
       effort: string | null; project: string | null; attempt_id: string | null;
       state: string | null; error: string | null; state_since: number | null; wait_reason: string | null;

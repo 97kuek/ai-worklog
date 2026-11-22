@@ -73,6 +73,23 @@ it("selects the newest eligible Mac, snapshots the card, and claims and complete
   expect((await s.start(crypto.randomUUID())).status).toBe(409);
 });
 
+it("removes completed launches from both Board reads after seven days and keeps execution history", async () => {
+  const s = await setup();
+  await s.queue();
+  const attempt = crypto.randomUUID();
+  await s.start(attempt);
+  await s.claim();
+  await s.result(attempt, "running");
+  await s.result(attempt, "completed");
+  s.tick(7 * 86_400_000 - 1);
+  expect((await s.board()).requests).toHaveLength(1);
+  s.tick(1);
+  expect((await s.board()).requests).toEqual([]);
+  expect(await (await s.call("/api/board/requests", s.user, "GET")).json()).toEqual({ requests: [] });
+  expect(await env.DB.prepare("SELECT state FROM board_launches WHERE attempt_id=?").bind(attempt).first("state")).toBe("completed");
+  expect(await (await s.call("/api/runner/claim", s.mac, "PUT", { ...capabilities, auto_queue: true })).json()).toEqual({ job: null });
+});
+
 it("allows a fresh attempt after failure without replaying older attempt IDs, including tied timestamps", async () => {
   const s = await setup();
   await s.queue();
