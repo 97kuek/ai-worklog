@@ -1,3 +1,4 @@
+import type { Launch } from "./launch.js";
 import { filterMenu } from "./filter-menu.js";
 import { el, modelSettings, type Session } from "./shared.js";
 
@@ -11,13 +12,14 @@ export interface RequestFields {
 
 export type Stage = "backlog" | "queued";
 export interface RequestState extends RequestFields { stage: Stage }
-export interface BoardRequest extends RequestState { id: string }
+export interface BoardRequest extends RequestState { id: string; launch?: Launch }
 
 export function requestComposer(
   sessions: Session[],
   requests: () => Iterable<BoardRequest>,
   save: (id: string, fields: RequestFields, stage: Stage, original?: BoardRequest) => Promise<void>,
   focusCard: (id: string) => void,
+  runnerProjects: string[],
 ) {
   const root = el("div", "request-composer");
   const launch = el("button", "request-add", "＋ Add");
@@ -122,7 +124,8 @@ export function requestComposer(
       }));
       renderModels();
     }
-    const projects = [...new Set([...sessions, ...requests()].flatMap(s => s.project ? [s.project] : []))].sort();
+    const knownProjects = [...sessions, ...requests()].flatMap(s => s.project ? [s.project] : []);
+    const projects = [...new Set([...runnerProjects, ...knownProjects])].sort();
     const projectField = el("div", "request-choice");
     const projectLabel = el("label", "", "Project (required)");
     const projectInput = el("input");
