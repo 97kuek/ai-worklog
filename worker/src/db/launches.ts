@@ -17,19 +17,36 @@ const latestQueueLaunch = `LEFT JOIN board_launches j ON j.seq=(
   ORDER BY seq DESC LIMIT 1)`;
 
 export async function listRequests(db: D1Database, user: string, now: number) {
-  const rows = await db.prepare(`SELECT r.id,r.title,r.stage,r.engine,r.model,r.effort,r.project,
+  // A running provider holds the runner until it exits, even if its last poll is old.
+  const rows = await db.prepare(`WITH runners AS (
+      SELECT p.*, EXISTS (SELECT 1 FROM board_launches active WHERE active.machine_id=p.machine_id
+        AND (active.state='running' OR (active.state='claimed' AND active.state_since>?))) AS busy
+      FROM runner_projects p JOIN machines m ON m.id=p.machine_id WHERE m.user_id=?
+    )
+    SELECT r.id,r.title,r.stage,r.engine,r.model,r.effort,r.project,
+      CASE WHEN r.stage='queued' AND (j.seq IS NULL OR j.state='pending') THEN (
+        SELECT CASE
+          WHEN MAX(NOT busy AND seen_at>?) THEN 'next_poll'
+          WHEN MAX(busy) THEN 'mac_busy'
+          ELSE 'waiting_for_mac' END
+        FROM runners WHERE project=r.project AND enabled=1
+          AND (j.seq IS NULL OR machine_id=j.machine_id)
+          AND r.engine IN (SELECT value FROM json_each(runners.engines))
+        HAVING COUNT(*)>0
+      ) END AS wait_reason,
       j.attempt_id,j.state,j.error,j.state_since
     FROM board_requests r ${latestQueueLaunch}
-    WHERE r.user_id=? ORDER BY r.queue_position,r.updated_at,r.id`).bind(user).all<{
+    WHERE r.user_id=? ORDER BY r.queue_position,r.updated_at,r.id`).bind(now - CLAIM_WITHIN, user, now - ONLINE_FOR, user).all<{
       id: string; title: string; stage: string; engine: string | null; model: string | null;
       effort: string | null; project: string | null; attempt_id: string | null;
-      state: string | null; error: string | null; state_since: number | null;
+      state: string | null; error: string | null; state_since: number | null; wait_reason: string | null;
     }>();
-  return rows.results.map(({ attempt_id, state, error, state_since, ...card }) => {
-    if (!attempt_id) return card;
+  return rows.results.map(({ attempt_id, state, error, state_since, wait_reason, ...card }) => {
+    const reason = wait_reason ?? "check_settings";
+    if (!attempt_id) return card.stage === "queued" ? { ...card, wait_reason: reason } : card;
     const expired = (state === "pending" || state === "claimed") && state_since! <= now - CLAIM_WITHIN;
     const launch = expired ? { attempt_id, state: "failed", error: "runner_timeout" } : { attempt_id, state, error };
-    return { ...card, launch };
+    return launch.state === "pending" ? { ...card, launch, wait_reason: reason } : { ...card, launch };
   });
 }
 

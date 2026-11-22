@@ -1,4 +1,4 @@
-import type { Launch } from "./launch.js";
+import type { Launch, queueWaitLabels } from "./launch.js";
 import { filterMenu } from "./filter-menu.js";
 import { el, modelSettings, type Session } from "./shared.js";
 
@@ -12,7 +12,7 @@ export interface RequestFields {
 
 export type Stage = "backlog" | "queued";
 export interface RequestState extends RequestFields { stage: Stage }
-export interface BoardRequest extends RequestState { id: string; launch?: Launch }
+export interface BoardRequest extends RequestState { id: string; launch?: Launch; wait_reason?: keyof typeof queueWaitLabels }
 
 export function requestComposer(
   sessions: Session[],

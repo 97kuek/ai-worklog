@@ -1,3 +1,10 @@
+export const queueWaitLabels = {
+  waiting_for_mac: "Waiting for Mac",
+  mac_busy: "Mac is busy",
+  next_poll: "Waiting for next check-in",
+  check_settings: "Check project and engine in Settings",
+} as const;
+
 export interface Launch {
   attempt_id: string;
   state: "pending" | "claimed" | "running" | "completed" | "failed";
