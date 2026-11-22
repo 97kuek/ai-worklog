@@ -60,8 +60,8 @@ export const requestLocked = `EXISTS (
 // The runner must receive a successful running acknowledgment before launching.
 // Expired claims can therefore fail safely. Running jobs never expire or get reclaimed.
 export function expireUnstarted(db: D1Database, user: string, now: number) {
-  return db.prepare(`UPDATE board_launches SET state='failed',error='runner_timeout'
-    WHERE user_id=? AND state IN ('pending','claimed') AND state_since<=?`).bind(user, now - CLAIM_WITHIN);
+  return db.prepare(`UPDATE board_launches SET state='failed',error='runner_timeout',state_since=state_since+?
+    WHERE user_id=? AND state IN ('pending','claimed') AND state_since<=?`).bind(CLAIM_WITHIN, user, now - CLAIM_WITHIN);
 }
 
 export async function startLaunch(db: D1Database, user: string, request: string, attempt: string, now: number) {
@@ -78,7 +78,9 @@ export async function startLaunch(db: D1Database, user: string, request: string,
       WHERE r.user_id=? AND r.id=? AND r.stage='queued' AND b.seen_at>?
         AND r.engine IN ('codex','claude_code')
         AND r.engine IN (SELECT value FROM json_each(b.engines))
-      ORDER BY b.seen_at DESC, m.id LIMIT 1
+      ORDER BY EXISTS (SELECT 1 FROM board_launches assigned WHERE assigned.user_id=r.user_id
+        AND assigned.machine_id=m.id AND assigned.state IN ('pending','claimed','running')),
+        b.seen_at DESC, m.id LIMIT 1
       ON CONFLICT DO NOTHING`).bind(attempt, now, user, request, now - ONLINE_FOR),
     db.prepare("SELECT request_id,attempt_id,state,error FROM board_launches WHERE user_id=? AND attempt_id=?")
       .bind(user, attempt),
@@ -145,16 +147,16 @@ export async function reportResult(db: D1Database, user: string, machine: string
   if (state === "running") {
     // A prepared job may be resumed from the Mac's journal after the owner
     // disabled its project. The runner waits for this acknowledgment to spawn.
-    checks.push(db.prepare(`UPDATE board_launches SET state='failed',error='project_disabled'
+    checks.push(db.prepare(`UPDATE board_launches SET state='failed',error='project_disabled',state_since=?
       WHERE user_id=? AND machine_id=? AND attempt_id=? AND state='claimed'
         AND project IN (SELECT project FROM runner_project_settings WHERE machine_id=? AND enabled=0)`)
-      .bind(user, machine, attempt, machine));
+      .bind(now, user, machine, attempt, machine));
   }
   const batch = await db.batch<{ state: string }>([
     ...checks,
-    db.prepare(`UPDATE board_launches SET state=?,error=? WHERE user_id=? AND machine_id=? AND attempt_id=?
+    db.prepare(`UPDATE board_launches SET state=?,error=?,state_since=? WHERE user_id=? AND machine_id=? AND attempt_id=?
       AND ((state='claimed' AND ? IN ('running','failed')) OR (state='running' AND ? IN ('failed','completed')))`)
-      .bind(state, error, user, machine, attempt, state, state),
+      .bind(state, error, now, user, machine, attempt, state, state),
     db.prepare("SELECT state FROM board_launches WHERE user_id=? AND machine_id=? AND attempt_id=?")
       .bind(user, machine, attempt),
   ]);
