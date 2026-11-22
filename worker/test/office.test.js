@@ -1,5 +1,6 @@
 import { Group, Vector3 } from "three";
 import { OfficeEmployee } from "../ui/office-employee";
+import { OfficeScene } from "../ui/office-scene";
 import { assignDesks } from "../ui/office";
 import { localDate, sunday } from "../ui/shared";
 
@@ -13,13 +14,14 @@ it("keeps only running tasks and preserves seats when the order of a poll change
     task("c"), task("d"), task("a"), task("b", "waiting"), task("e", "running", "2026-11-22"),
     task("f", null), task("g", "unknown"),
   ]);
-  expect(next).toEqual(new Map([["a", 0], ["d", 1], ["c", 2]]));
+  expect(next).toEqual(new Map([["a", first.get("a")], ["d", first.get("b")], ["c", first.get("c")]]));
 });
 
 it("starts a new task with a rested employee when a colleague finishes in the same poll", () => {
   const assigned = assignDesks(new Map(), [task("first")]);
   const next = assignDesks(assigned, [task("first", "waiting"), task("second")]);
-  expect(next).toEqual(new Map([["second", 1]]));
+  expect(next.size).toBe(1);
+  expect(next.get("second")).not.toBe(assigned.get("first"));
 });
 
 it("retains employee assignments across rooms and reuses vacant seats for new tasks", () => {
@@ -27,8 +29,26 @@ it("retains employee assignments across rooms and reuses vacant seats for new ta
   const first = assignDesks(new Map(), tasks);
   expect(new Set(first.values()).size).toBe(12);
   const remaining = assignDesks(first, [tasks[10], tasks[11], task("new"), tasks[10]]);
-  expect(remaining).toEqual(new Map([["10", 10], ["11", 11], ["new", 0]]));
+  expect(remaining.size).toBe(3);
+  expect(remaining.get("10")).toBe(first.get("10"));
+  expect(remaining.get("11")).toBe(first.get("11"));
+  expect(new Set(remaining.values()).size).toBe(3);
+  expect(remaining.get("new")).toBeLessThan(12);
   expect(assignDesks(remaining, []).size).toBe(0);
+});
+
+it("can send any available resident to work, including residents of previously opened rooms", () => {
+  const random = vi.spyOn(Math, "random");
+  try {
+    const selected = new Set();
+    for (const value of [0, 0.2, 0.4, 0.6, 0.8, 0.99]) {
+      random.mockReturnValue(value);
+      selected.add(assignDesks(new Map(), [task("new")], 2).get("new"));
+    }
+    expect(selected).toEqual(new Set([0, 1, 2, 3, 4, 5]));
+  } finally {
+    random.mockRestore();
+  }
 });
 
 function employee(slot = 0) {
@@ -48,6 +68,26 @@ function employee(slot = 0) {
   const x = [-2.88, -0.71, 1.46][slot];
   return new OfficeEmployee(figure, new Vector3(x, 0, -1.8), new Vector3(x, 0, 1), new Group(), slot);
 }
+
+it("seats the snapshot immediately and animates subsequent arrivals in the same room", () => {
+  const desks = [0, 1, 2].map(slot => ({ group: new Group(), person: employee(slot) }));
+  // Use the real employees and scene updates without constructing a WebGL renderer in workerd.
+  const scene = Object.assign(Object.create(OfficeScene.prototype), {
+    desks, room: 0, onscreen: true, reducedMotion: { matches: false }, renderer: { shadowMap: {} }, select() {},
+  });
+  scene.setSeats(["existing"], 0, true);
+  expect(desks[0].person.root.position.z).toBeCloseTo(1.557);
+  expect(desks[1].person.root.position.z).toBeCloseTo(-1.8);
+  scene.setSeats([undefined, "new"], 0);
+  expect(desks[0].person.root.position.z).toBeCloseTo(1.557);
+  expect(desks[1].person.root.position.z).toBeCloseTo(-1.8);
+  scene.setSeats([undefined, "new"], 0, true);
+  expect(desks[0].person.root.position.z).toBeCloseTo(-1.8);
+  expect(desks[1].person.root.position.z).toBeCloseTo(1.557);
+  scene.setSeats(["other room"], 1);
+  expect(desks[0].person.root.position.z).toBeCloseTo(1.557);
+  expect(desks[1].person.root.position.z).toBeCloseTo(-1.8);
+});
 
 it("keeps three residents drinking at rest and settles immediately for reduced motion", () => {
   for (const [slot, drink] of ["Coffee", "Tea", "Latte"].entries()) {
@@ -129,5 +169,5 @@ it("seats a completed session again only after a newer running observation", () 
   const done = "2026-11-22T10:00:00Z";
   const session = at => ({ id: "resumed", completed_at: done, observed_status: { state: "running", at } });
   expect(assignDesks(new Map(), [session(done)]).size).toBe(0);
-  expect(assignDesks(new Map(), [session("2026-11-22T10:01:00Z")]).get("resumed")).toBe(0);
+  expect(assignDesks(new Map(), [session("2026-11-22T10:01:00Z")]).has("resumed")).toBe(true);
 });
