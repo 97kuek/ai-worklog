@@ -98,3 +98,9 @@ Taskfolio must never upload conversation text or prompts. Any change that sends 
 ## License
 
 By contributing, you agree that your contributions will be licensed under the [MIT License](LICENSE).
+
+### Publish the production Worker
+
+In GitHub Actions, open **Deploy Taskfolio**, select **Run workflow** on `main`, then run it. Select **Verify the release and Cloudflare connection without publishing** to build, test and check the connection only. A publication records the Git commit in the run summary and Cloudflare version metadata.
+
+The GitHub `production` environment permits deployments from the `main` branch. Its `CLOUDFLARE_API_TOKEN` secret has the Individual Workers Editor role for the Taskfolio Worker. The environment variables `CLOUDFLARE_ACCOUNT_ID` and `TASKFOLIO_DATABASE_ID` select the existing account and database. For releases with new D1 migrations, apply those migrations with the database operator's credentials before publishing.
