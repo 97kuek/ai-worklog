@@ -1,4 +1,5 @@
 import { summarizeActivity } from "../ui/activity";
+import { addDays } from "../ui/shared";
 
 const start = new Date(2026, 10, 22);
 const at = (day, hour, minute = 0) => new Date(2026, 10, day, hour, minute);
@@ -10,6 +11,21 @@ const sessions = [
   { id: "b", tool: "codex", models: ["model B"] },
   { id: "c", tool: "unknown", models: [] },
 ];
+
+it("begins the following reporting day at midnight when the starting day begins at 01:00", () => {
+  // Some time zones advance clocks at midnight. The first valid instant then has hour 1.
+  const day = at(22, 1);
+  const next = addDays(day, 1);
+  const blocks = [
+    block("a", at(22, 23), at(23, 1)),
+    block("b", at(23, 0), at(23, 0)),
+  ];
+  const stats = summarizeActivity({ sessions, blocks }, day, next);
+  expect(next).toEqual(at(23, 0));
+  expect(stats.hourlySlots).toHaveLength(23);
+  expect(stats.totalMs).toBe(60 * 60000);
+  expect([...stats.tasks]).toEqual(["a"]);
+});
 
 it("clips to the reporting day, merges concurrent tasks and counts unique model users", () => {
   const blocks = [

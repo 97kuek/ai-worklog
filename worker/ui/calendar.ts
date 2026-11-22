@@ -1,5 +1,5 @@
 import { clockRanges } from "./local-time.js";
-import { dayLabel, weekday, el, engineName, modelLabels, stateOf, statusLabel, titleOf, type Block, type Session } from "./shared.js";
+import { addDays, dayLabel, weekday, el, engineName, modelLabels, stateOf, statusLabel, titleOf, type Block, type Session } from "./shared.js";
 
 const dayMinutes = 24 * 60;
 const minimumMinutes = 18;
@@ -13,11 +13,6 @@ const positions = new WeakMap<HTMLElement, CalendarPosition>();
 function clock(minute: number): string {
   const value = Math.floor(minute);
   return String(Math.floor(value / 60)).padStart(2, "0") + ":" + String(value % 60).padStart(2, "0");
-}
-
-// Use local calendar arithmetic: a day containing a clock change may be 23 or 25 hours.
-function dayAt(start: Date, index: number): Date {
-  return new Date(start.getFullYear(), start.getMonth(), start.getDate() + index);
 }
 
 function layoutDay(date: Date, next: Date, entries: { block: Block; session: Session; start: number; end: number }[]): Piece[] {
@@ -99,9 +94,9 @@ export function renderCalendar(root: HTMLElement, sessions: Session[], blocks: B
     const end = Date.parse(block.ended_at);
     return session && end >= start ? [{ block, session, start, end }] : [];
   });
-  const dates = Array.from({ length: 8 }, (_, i) => dayAt(start, i));
+  const dates = Array.from({ length: 8 }, (_, i) => addDays(start, i));
   const days = dates.slice(0, 7).map((date, i) => layoutDay(date, dates[i + 1]!, entries));
-  const today = +dayAt(new Date(), 0);
+  const today = +addDays(new Date(), 0);
   const todayIndex = dates.slice(0, 7).findIndex(date => +date === today);
   const initial = todayIndex >= 0 ? todayIndex : Math.max(0, days.findIndex(day => day.length > 0));
   const previous = positions.get(root);

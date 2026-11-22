@@ -95,9 +95,8 @@ export function statusText(s: Session) {
   return el("span", "status-text s-" + (state in labels ? state : "unknown"), statusLabel(state));
 }
 export function addDays(d: Date, n: number) {
-  const copy = new Date(d);
-  copy.setDate(copy.getDate() + n);
-  return copy;
+  // Midnight can be skipped by a clock change. Resolve each target date independently.
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
 }
 export function sunday(d: Date) {
   const day = new Date(d.getFullYear(), d.getMonth(), d.getDate());
