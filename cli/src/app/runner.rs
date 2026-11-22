@@ -64,13 +64,9 @@ fn checkpoint(path: &Path, entry: &Journal) -> Result<()> {
 }
 
 fn sender(cfg: &config::Config) -> Result<HttpSender> {
-    let uri = cfg
-        .api_url
-        .parse::<ureq::http::Uri>()
-        .map_err(|_| "API URL が不正です")?;
+    let uri = config::api_endpoint(&cfg.api_url)?;
     let authority = uri.authority().ok_or("API URL にホストが必要です")?;
-    if authority.as_str().contains('@') || uri.query().is_some() || !matches!(uri.path(), "" | "/")
-    {
+    if !matches!(uri.path(), "" | "/") {
         return Err("API URL にはオリジンを指定してください");
     }
     let local = matches!(authority.host(), "127.0.0.1" | "[::1]" | "localhost");

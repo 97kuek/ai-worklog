@@ -264,6 +264,7 @@ fn run_login(mut parser: lexopt::Parser) -> Result<ExitCode, lexopt::Error> {
         }
     }
     let url = url.ok_or("missing --url")?;
+    config::api_endpoint(&url)?;
     let machine_name = machine.ok_or("missing --machine-name")?;
     let client_id = client_id.ok_or("missing --client-id")?;
     if let Some(e) = &expires
@@ -278,27 +279,22 @@ fn run_login(mut parser: lexopt::Parser) -> Result<ExitCode, lexopt::Error> {
         api_url: url,
         machine_name,
         client_id: client_id.clone(),
-        token_expires_on: expires.or_else(|| prev.as_ref().and_then(|p| p.token_expires_on.clone())),
+        token_expires_on: expires.or_else(|| prev.as_ref().filter(|p| p.client_id == client_id).and_then(|p| p.token_expires_on.clone())),
         naming: prev.as_ref().map(|p| p.naming.clone()).unwrap_or_default(),
         gap_minutes: prev.as_ref().map_or(30, |p| p.gap_minutes),
         skills_cwd: prev.and_then(|p| p.skills_cwd),
     };
+    println!("Enter the Client Secret when the Keychain prompt asks for it (it is not echoed or stored anywhere else).");
+    if let Err(e) = keychain::store_secret_interactive(&client_id) {
+        eprintln!("taskfolio: {e}");
+        return Ok(ExitCode::FAILURE);
+    }
     if let Err(e) = config::save(&path, &cfg) {
         eprintln!("taskfolio: cannot write {}: {e}", path.display());
         return Ok(ExitCode::FAILURE);
     }
-    println!("wrote {}", path.display());
-    println!("Enter the Client Secret when the Keychain prompt asks for it (it is not echoed or stored anywhere else).");
-    match keychain::store_secret_interactive(&client_id) {
-        Ok(()) => {
-            println!("stored the Client Secret in the Keychain (service {})", keychain::SERVICE);
-            Ok(ExitCode::SUCCESS)
-        }
-        Err(e) => {
-            eprintln!("taskfolio: {e}");
-            Ok(ExitCode::FAILURE)
-        }
-    }
+    println!("Stored the Client Secret in the Keychain and wrote {}", path.display());
+    Ok(ExitCode::SUCCESS)
 }
 
 fn run_setup(mut parser: lexopt::Parser) -> Result<ExitCode, lexopt::Error> {

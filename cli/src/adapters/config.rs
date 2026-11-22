@@ -57,10 +57,25 @@ pub fn home_dir() -> PathBuf {
     })
 }
 
+pub fn api_endpoint(url: &str) -> Result<ureq::http::Uri, &'static str> {
+    let uri = url.parse::<ureq::http::Uri>().map_err(|_| "invalid API URL")?;
+    let authority = uri.authority().ok_or("API URL needs a host")?;
+    if authority.host().is_empty() || authority.as_str().contains('@') || uri.query().is_some() || url.contains('#') {
+        return Err("API URL may not contain credentials, a query or a fragment");
+    }
+    let loopback = matches!(authority.host(), "127.0.0.1" | "[::1]" | "localhost");
+    if uri.scheme_str() != Some("https") && !(loopback && uri.scheme_str() == Some("http")) {
+        return Err("remote API URLs require HTTPS");
+    }
+    Ok(uri)
+}
+
 pub fn load(path: &Path) -> Result<Config, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    serde_json::from_str(&text).map_err(|e| format!("invalid config {}: {e}", path.display()))
+    let config: Config = serde_json::from_str(&text).map_err(|e| format!("invalid config {}: {e}", path.display()))?;
+    api_endpoint(&config.api_url)?;
+    Ok(config)
 }
 
 /// Writes a temp file next to the target, then renames it into place (mode 0600).
@@ -72,6 +87,16 @@ pub fn save(path: &Path, c: &Config) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validates_endpoints_before_credentials_are_used() {
+        for url in ["https://example.test", "https://example.test/service/", "http://[::1]:8888", "http://127.0.0.1"] {
+            assert!(api_endpoint(url).is_ok(), "{url}");
+        }
+        for url in ["http://example.test", "https://user@example.test", "/relative", "https://example.test/?x", "https://example.test/#part"] {
+            assert!(api_endpoint(url).is_err(), "{url}");
+        }
+    }
 
     #[test]
     fn round_trips_and_fills_defaults() {
