@@ -1,19 +1,23 @@
 {
-  "name": "ai-worklog-worker",
+  "name": "taskfolio-worker",
   "version": "1.0.0",
-  "description": "ai-worklog Cloudflare Worker",
+  "description": "Taskfolio Cloudflare Worker",
   "scripts": {
     "test": "vitest run",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p ui/tsconfig.json --noEmit",
     "types": "wrangler types",
-    "deploy": "wrangler d1 migrations apply DB --remote && wrangler deploy"
+    "deploy": "wrangler d1 migrations apply DB --remote && wrangler deploy --keep-vars",
+    "build:ui": "tsc -p ui/tsconfig.json && esbuild ui/office-scene.ts --bundle --format=esm --target=es2022 --minify --outfile=public/assets/office-scene.js"
   },
   "type": "module",
   "dependencies": {
-    "hono": "4.13.19"
+    "hono": "4.13.19",
+    "three": "0.181.2"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "1.9",
+    "@types/three": "0.181.0",
+    "esbuild": "0.28.2",
     "typescript": "^7.0.2",
     "vitest": "^5.1.1",
     "wrangler": "^4.166.0"

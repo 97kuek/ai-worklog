@@ -3,9 +3,79 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>ai-worklog</title>
+    <meta name="color-scheme" content="light" />
+    <title>Work log | Taskfolio</title>
+    <link rel="stylesheet" href="/worklog.css" />
+    <link rel="stylesheet" href="/calendar.css" />
+    <link rel="stylesheet" href="/board.css" />
+    <link rel="stylesheet" href="/stats.css" />
+    <link rel="stylesheet" href="/detail.css" />
+    <link rel="stylesheet" href="/office.css" />
+    <script type="module" src="/assets/app.js"></script>
   </head>
   <body>
-    <h1>ai-worklog</h1>
+    <a href="#main" class="skip">Skip to content</a>
+    <header class="mast">
+      <div class="mast-inner">
+        <a href="#log" class="brand" aria-label="Taskfolio Work log">
+          <span class="mark"><img src="/taskfolio-mark.webp" height="32" width="32" alt="" /></span>Taskfolio
+        </a>
+        <button
+          type="button"
+          id="nav-toggle"
+          class="icon-button"
+          aria-label="Navigation menu"
+          aria-controls="main-nav"
+          aria-expanded="false"
+        >
+          <img src="/icons/lucide/menu.svg" width="20" height="20" alt="" />
+        </button>
+        <nav id="main-nav" aria-label="Navigation">
+          <a href="#log">Work log</a>
+          <a href="#calendar">Calendar</a>
+          <a href="#board">Board</a>
+          <a href="#stats">Activity</a>
+          <a href="#skills">Skills</a>
+          <a href="#office">Office</a>
+        </nav>
+        <button id="refresh" type="button" class="refresh icon-button" aria-label="Refresh" title="Refresh">
+          <img src="/icons/lucide/refresh-cw.svg" width="20" height="20" alt="" />
+        </button>
+      </div>
+    </header>
+    <main id="main" tabindex="-1">
+      <div class="page-head">
+        <div class="view-heading">
+          <h1 id="title">Work log</h1>
+          <div id="stats-period" role="group" aria-label="Activity period" hidden>
+            <button id="daily" type="button">Daily</button><button id="weekly" type="button">Weekly</button>
+          </div>
+        </div>
+        <div id="week-controls" class="week-controls">
+          <button id="prev" class="icon-button" type="button" aria-label="Previous week">
+            <img src="/icons/lucide/chevron-left.svg" width="20" height="20" alt="" />
+          </button>
+          <label class="date-control">
+            <span id="week-range"></span><input id="date" type="date" aria-label="Select week" />
+          </label>
+          <button id="next" class="icon-button" type="button" aria-label="Next week">
+            <img src="/icons/lucide/chevron-right.svg" width="20" height="20" alt="" />
+          </button>
+          <button id="today" class="this-week">This week</button>
+        </div>
+      </div>
+      <div id="notice" role="status" aria-live="polite"></div>
+      <section id="view" aria-labelledby="title"></section>
+      <noscript>Enable JavaScript to open Taskfolio.</noscript>
+    </main>
+    <dialog id="detail" aria-labelledby="detail-title">
+      <div class="dialog-head">
+        <div id="detail-heading"><h2 id="detail-title">Task details</h2></div>
+        <button id="close" class="icon-button" type="button" aria-label="Close details" title="Close">
+          <img src="/icons/lucide/x.svg" width="20" height="20" alt="" />
+        </button>
+      </div>
+      <div id="detail-body"></div>
+    </dialog>
   </body>
 </html>
