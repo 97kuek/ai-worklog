@@ -114,7 +114,7 @@ fn collect_says_so_and_exits_zero_when_another_collect_holds_the_lock() {
 }
 
 #[test]
-fn status_hook_keeps_only_the_observation_and_does_not_trigger_collection() {
+fn status_hook_persists_only_observations_and_coalesces_collection_requests() {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use std::process::Stdio;
@@ -139,6 +139,28 @@ fn status_hook_keeps_only_the_observation_and_does_not_trigger_collection() {
     assert_eq!(read_latest(&home, Tool::ClaudeCode, "id-1").unwrap().unwrap().state, ObservedState::Waiting);
     assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
     assert!(!home.join("kickstarted").exists());
+    let queue = home.join("collect-queue");
+    let pending = queue.join("pending");
+    assert!(pending.is_file());
+    assert_eq!(std::fs::metadata(&pending).unwrap().len(), 0);
+
+    // The collector consumes pending work when it acquires the lock. A burst during
+    // that run must leave one request for a subsequent run, including after restart.
+    use taskfolio::adapters::status_hook::record;
+    use taskfolio::app::collect::acquire_lock;
+    let running = acquire_lock(&home).unwrap().unwrap();
+    assert!(!pending.exists());
+    for event in ["UserPromptSubmit", "Stop", "UserPromptSubmit", "PreModelRequest"] {
+        let input = serde_json::json!({"session_id":"codex-1", "hook_event_name":event});
+        record(&home, Tool::Codex, input.to_string().as_bytes()).unwrap();
+    }
+    assert!(acquire_lock(&home).unwrap().is_none());
+    assert_eq!(std::fs::read_dir(&queue).unwrap().count(), 1);
+    assert!(pending.is_file());
+    drop(running);
+    let _next = acquire_lock(&home).unwrap().unwrap();
+    assert!(!pending.exists());
+    assert_eq!(read_latest(&home, Tool::Codex, "codex-1").unwrap().unwrap().state, ObservedState::Running);
     std::fs::remove_dir_all(home).unwrap();
 }
 

@@ -11,7 +11,7 @@ use super::ledger::{self, Ledger};
 use super::state::{self, FileEntry, State};
 use crate::adapters::claude::{list_claude_files, merge_claude, read_claude_file, ClaudeFile, ClaudeFileState};
 use crate::adapters::codex::{list_codex_files, merge_codex, read_codex_file, read_thread_titles, CodexFileState, CodexRole, ReviewContext};
-use crate::adapters::fsutil::open_lock_file;
+use crate::adapters::fsutil::open_private_file;
 use crate::adapters::http::{SendError, Sender};
 use crate::adapters::jsonl::{stat, FileId};
 use crate::adapters::namer::{build_material, NameOutcome, Namer};
@@ -197,13 +197,18 @@ pub fn collect_and_save(opts: &CollectOptions, save: &SaveOptions, sender: &dyn 
     report
 }
 
-/// ~/.taskfolio/collect.lock を try_lock する。取れなければ None
+/// Begin a collection and consume its pending wakeup. A competing collector
+/// leaves it queued for the lock holder's next pass.
 pub fn acquire_lock(home: &Path) -> io::Result<Option<File>> {
-    acquire_named_lock(home, "collect.lock")
+    let lock = acquire_named_lock(home, "collect.lock")?;
+    if lock.is_some() {
+        status_hook::take_collect_request(home)?;
+    }
+    Ok(lock)
 }
 
 pub(super) fn acquire_named_lock(home: &Path, name: &str) -> io::Result<Option<File>> {
-    let file = open_lock_file(home, name)?;
+    let file = open_private_file(home, name)?;
     match file.try_lock() {
         Ok(()) => Ok(Some(file)),
         Err(TryLockError::WouldBlock) => Ok(None),

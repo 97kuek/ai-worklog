@@ -8,7 +8,7 @@ pub fn create_private_dir(path: &Path) -> std::io::Result<()> {
     DirBuilder::new().recursive(true).mode(0o700).create(path)
 }
 
-pub(crate) fn open_lock_file(home: &Path, name: &str) -> std::io::Result<std::fs::File> {
+pub(crate) fn open_private_file(home: &Path, name: &str) -> std::io::Result<std::fs::File> {
     create_private_dir(home)?;
     OpenOptions::new().create(true).truncate(false).write(true).mode(0o600).open(home.join(name))
 }

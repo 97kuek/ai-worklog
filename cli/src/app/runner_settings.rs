@@ -129,7 +129,7 @@ pub fn add_folder(home: &Path, dir: &Path, name: Option<&str>) -> Result<String>
     if !dir.is_dir() || dir.to_str().is_none() {
         return Err("UTF-8のフォルダを指定してください");
     }
-    let lock = fsutil::open_lock_file(home, "runner-settings.lock")
+    let lock = fsutil::open_private_file(home, "runner-settings.lock")
         .map_err(|_| "設定ロックを開けません")?;
     lock.lock().map_err(|_| "設定ロックを取得できません")?;
     let mut settings = Settings::read(home)?;
