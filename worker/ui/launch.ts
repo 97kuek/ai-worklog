@@ -4,14 +4,12 @@ export interface Launch {
   error?: string | null;
 }
 
-export type StartRequest = (id: string, attempt: string) => Promise<{ launch: Launch }>;
-
-export const launchConflictMessages: Record<string, string> = {
-  launch_conflict: "Another launch already exists. Refresh the board to see its status.",
-  not_queued: "Move this request to Queued before starting it.",
-  engine_required: "Edit the request and select an engine.",
-  project_required: "Edit the request and select a project.",
-  runner_unavailable: "No Mac is available for this project and engine. Check the project registration and make sure the Mac runner can find the engine.",
+export const requestErrorMessages: Record<string, string> = {
+  launch_conflict: "The Mac has already picked up this request. Refresh the board to see its status.",
+  engine_required: "Edit this request and select an engine before queuing it.",
+  project_required: "Select a project for this request.",
+  project_unregistered: "Select a project registered on the Mac before queuing this request.",
+  engine_unavailable: "The registered Mac does not support this engine for the selected project.",
 };
 
 const failureMessages: Record<string, string> = {
@@ -28,25 +26,4 @@ const failureMessages: Record<string, string> = {
 
 export function failureMessage(error?: string | null) {
   return error ? failureMessages[error] ?? error : "Check the runner on your Mac before retrying.";
-}
-
-// Preserve the same start across a lost response or a reload in this tab.
-const attempts = new Map<string, string>();
-export function startAttempt(id: string, previous = "") {
-  const key = "taskfolio.start." + id;
-  let stored = attempts.get(key);
-  try { stored ??= sessionStorage.getItem(key) ?? undefined; } catch { /* Storage may be unavailable. */ }
-  const [prior, attempt] = stored?.split("/") ?? [];
-  if (prior === previous && attempt) return attempt;
-  const next = crypto.randomUUID();
-  const entry = previous + "/" + next;
-  attempts.set(key, entry);
-  try { sessionStorage.setItem(key, entry); } catch { /* Keep the in-memory entry. */ }
-  return next;
-}
-
-export function confirmAttempt(id: string) {
-  const key = "taskfolio.start." + id;
-  attempts.delete(key);
-  try { sessionStorage.removeItem(key); } catch { /* Storage may be unavailable. */ }
 }

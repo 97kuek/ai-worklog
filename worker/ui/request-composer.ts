@@ -59,7 +59,7 @@ export function requestComposer(
       title: field.value, engine: original?.engine ?? null, model: original?.model ?? null,
       effort: original?.effort ?? null, project: original?.project ?? null,
     };
-    let stage: Stage = original?.stage ?? "backlog";
+    const stage: Stage = original?.stage ?? "backlog";
     let id = crypto.randomUUID();
     let saving = false;
     function choice(key: keyof Omit<RequestFields, "title">, title: string,
@@ -125,7 +125,9 @@ export function requestComposer(
       renderModels();
     }
     const knownProjects = [...sessions, ...requests()].flatMap(s => s.project ? [s.project] : []);
-    const projects = [...new Set([...runnerProjects, ...knownProjects])].sort();
+    const registered = new Set(runnerProjects);
+    const projects = [...new Set([...runnerProjects, ...(stage === "backlog" ? knownProjects : []),
+      ...(original?.project ? [original.project] : [])])].sort();
     const projectField = el("div", "request-choice");
     const projectLabel = el("label", "", "Project (required)");
     const projectInput = el("input");
@@ -143,10 +145,11 @@ export function requestComposer(
     projectControl.append(projectInput);
     projectField.append(projectControl);
     let projectFocus: HTMLElement = projectInput;
-    if (projects.length) {
-      const options: [string, string][] = projects.map(p => ["project:" + p, p]);
+    if (projects.length || stage === "queued") {
+      const options: [string, string][] = projects.map(p => ["project:" + p, registered.has(p) ? p : p + " (unregistered)"]);
+      if (stage === "backlog") options.push(["new", "New project…"]);
       const menu = filterMenu("request-project", "Project", [
-        ["", "Select project"], ...options, ["new", "New project…"],
+        ["", "Select project"], ...options,
       ], fields.project ? "project:" + fields.project : "", value => {
         const isNew = value === "new";
         projectInput.hidden = !isNew;
@@ -172,16 +175,6 @@ export function requestComposer(
     projectLabel.htmlFor = projectFocus.id;
     choices.append(projectField, engineSlot, modelSlot, effortSlot);
     renderEngine();
-    if (original) {
-      const container = el("div", "request-choice");
-      const caption = el("label", "", "Lane");
-      const menu = filterMenu("request-stage", "Lane", [["backlog", "Backlog"], ["queued", "Queued"]], stage, value => {
-        stage = value === "queued" ? "queued" : "backlog";
-      });
-      caption.htmlFor = menu.trigger.id;
-      container.append(caption, menu.root);
-      choices.append(container);
-    }
     field.oninput = () => { id = crypto.randomUUID(); field.setCustomValidity(""); };
     form.onsubmit = async event => {
       event.preventDefault();
