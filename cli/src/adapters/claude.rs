@@ -69,6 +69,7 @@ struct Usage {
 
 /// 1つのファイルから読んだ分の途中結果。state ファイルに保存して続きから読むために使う
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ClaudeFileState {
     /// このファイルから読んだ分だけ
     pub raw: RawSession,

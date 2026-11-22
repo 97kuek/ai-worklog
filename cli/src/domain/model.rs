@@ -38,6 +38,7 @@ pub struct TokenEvent {
 
 /// A session as read from one tool's logs, before blocks are built.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RawSession {
     /// Adapters always set this to `Some`.
     pub tool: Option<Tool>,
