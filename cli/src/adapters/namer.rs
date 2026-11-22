@@ -38,7 +38,7 @@ impl ClaudeCliNamer {
     fn run(&self, material: &str) -> Option<String> {
         std::fs::create_dir_all(&self.cwd).ok()?;
         let mut child = Command::new(&self.command)
-            .args(["-p", "--model", &self.model, "--no-session-persistence", "--tools", ""])
+            .args(isolated_args(&self.model))
             .current_dir(&self.cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -80,6 +80,25 @@ impl ClaudeCliNamer {
         }
         Some(String::from_utf8_lossy(&out).into_owned())
     }
+}
+
+/// 利用者の設定・プラグイン・フック・MCP・スラッシュコマンドを読み込まず、道具も使わせない。
+/// `--bare` はログイン情報（キーチェーン）まで読まなくなるので使わない
+fn isolated_args(model: &str) -> [&str; 12] {
+    [
+        "-p",
+        "--model",
+        model,
+        "--no-session-persistence",
+        "--tools",
+        "",
+        "--setting-sources",
+        "project",
+        "--settings",
+        r#"{"disableAllHooks":true}"#,
+        "--strict-mcp-config",
+        "--disable-slash-commands",
+    ]
 }
 
 pub fn build_material(source_title: Option<&str>, user_texts: &[String]) -> String {
@@ -175,6 +194,42 @@ mod tests {
         std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         p.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn cli_namer_isolates_claude_from_user_settings() {
+        let dir = std::env::temp_dir().join(format!("ai-worklog-namer-argv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let argv = dir.join("argv.txt");
+        let fake = script(
+            &dir,
+            "claude.sh",
+            &format!("for a in \"$@\"; do printf '%s\\n' \"$a\"; done > '{}'\ncat >/dev/null\nprintf '認証の実装'", argv.display()),
+        );
+        let namer = ClaudeCliNamer { command: fake, model: "haiku".into(), cwd: dir.join("work"), timeout: Duration::from_secs(5) };
+        assert_eq!(namer.name("m"), NameOutcome::Named("認証の実装".into()));
+        let got = std::fs::read_to_string(&argv).unwrap();
+        let got: Vec<&str> = got.lines().collect();
+        assert_eq!(
+            got,
+            [
+                "-p",
+                "--model",
+                "haiku",
+                "--no-session-persistence",
+                "--tools",
+                "",
+                "--setting-sources",
+                "project",
+                "--settings",
+                r#"{"disableAllHooks":true}"#,
+                "--strict-mcp-config",
+                "--disable-slash-commands",
+            ]
+        );
+        assert!(!got.contains(&"--bare"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
