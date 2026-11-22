@@ -1,4 +1,4 @@
-# Contributing to ai-worklog
+# Contributing to Taskfolio
 
 Thanks for your interest in contributing! This guide describes how we branch, commit, and review changes.
 
@@ -93,7 +93,7 @@ To run the Worker locally, copy `.dev.vars.example` to `.dev.vars` and fill in t
 
 ## Privacy
 
-ai-worklog must never upload conversation text or prompts. Any change that sends new data off the user's machine needs a clear explanation in the pull request.
+Taskfolio must never upload conversation text or prompts. Any change that sends new data off the user's machine needs a clear explanation in the pull request.
 
 ## License
 
