@@ -161,10 +161,10 @@ fn run_login(mut parser: lexopt::Parser) -> Result<ExitCode, lexopt::Error> {
     let url = url.ok_or("missing --url")?;
     let machine_name = machine.ok_or("missing --machine-name")?;
     let client_id = client_id.ok_or("missing --client-id")?;
-    if let Some(e) = &expires {
-        if e.len() != 10 || e.parse::<jiff::civil::Date>().is_err() {
-            return Err(format!("--expires must be YYYY-MM-DD, got `{e}`").into());
-        }
+    if let Some(e) = &expires
+        && (e.len() != 10 || e.parse::<jiff::civil::Date>().is_err())
+    {
+        return Err(format!("--expires must be YYYY-MM-DD, got `{e}`").into());
     }
     let path = config::home_dir().join("config.json");
     // 既存の naming / gap_minutes の設定は引き継ぐ

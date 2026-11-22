@@ -176,10 +176,12 @@ fn apply_line(st: &mut ClaudeFileState, is_main: bool, line: Line) {
                 if let Some(msg) = line.message {
                     add_assistant_usage(st, at, line.request_id, msg);
                 }
-            } else if is_main && !line.is_meta && st.user_texts.len() < MAX_USER_TEXTS {
-                if let Some(text) = line.message.and_then(|m| m.content).and_then(user_text) {
-                    st.user_texts.push(text);
-                }
+            } else if is_main
+                && !line.is_meta
+                && st.user_texts.len() < MAX_USER_TEXTS
+                && let Some(text) = line.message.and_then(|m| m.content).and_then(user_text)
+            {
+                st.user_texts.push(text);
             }
         }
         _ => {}
