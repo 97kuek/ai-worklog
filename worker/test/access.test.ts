@@ -141,6 +141,20 @@ describe("createAccessAuthenticator", () => {
     );
   });
 
+  it("throws_config_error_when_team_domain_is_malformed", async () => {
+    const kp = await makeKeyPair("k1");
+    const getKeys = vi.fn(async () => [kp.publicJwk]);
+    const auth = createAccessAuthenticator(getKeys);
+    const token = await kp.sign(accessClaims({ email: "owner@example.com" }));
+    for (const bad of ["https://test-team.cloudflareaccess.com", "test-team.cloudflareaccess.com/"]) {
+      await expect(auth(req(token), { ...env, ACCESS_TEAM_DOMAIN: bad })).rejects.toBeInstanceOf(
+        ConfigError,
+      );
+    }
+    expect(getKeys).not.toHaveBeenCalled();
+    expect(await auth(req(token), env)).toEqual({ kind: "user", email: "owner@example.com" });
+  });
+
   it("propagates_key_fetch_failure", async () => {
     const kp = await makeKeyPair("k1");
     const auth = createAccessAuthenticator(async () => {

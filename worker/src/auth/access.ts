@@ -4,6 +4,8 @@ import { type Authenticate, ConfigError } from "./identity";
 
 const nonEmpty = (v: unknown): v is string => typeof v === "string" && v.length > 0;
 
+const TEAM_DOMAIN_PATTERN = /^[a-z0-9-]+\.cloudflareaccess\.com$/i;
+
 export function createAccessAuthenticator(
   getKeys: (teamDomain: string, opts?: { refresh?: boolean }) => Promise<HonoJsonWebKey[]>,
 ): Authenticate {
@@ -13,6 +15,10 @@ export function createAccessAuthenticator(
     // Never authenticate without the iss/aud checks.
     if (!nonEmpty(teamDomain) || !nonEmpty(aud)) {
       throw new ConfigError("ACCESS_TEAM_DOMAIN and ACCESS_AUD must be set");
+    }
+
+    if (!TEAM_DOMAIN_PATTERN.test(teamDomain)) {
+      throw new ConfigError("ACCESS_TEAM_DOMAIN must look like <team>.cloudflareaccess.com");
     }
 
     const token = req.headers.get("Cf-Access-Jwt-Assertion");
