@@ -248,3 +248,17 @@ it("validates manual names and permits only a same-origin request from the ownin
   expect((await request(path, user, valid)).status).toBe(200);
   expect((await board()).sessions[0]!.manual_title).toBe("🟣".repeat(100));
 });
+
+it("shows resumed work in the office after manual completion while keeping the board completion", async () => {
+  const { request, upload, board, post } = await setup();
+  const original = example.sessions[0]!;
+  await upload([original]);
+  const id = (await board()).sessions[0]!.id;
+  expect((await request("/api/sessions/" + id + "/complete", undefined, post)).status).toBe(200);
+  const later = new Date(NOW + 1000).toISOString();
+  await upload([{ ...original, observed_status: { state: "running", at: later } }]);
+  const read = async () => (await (await request("/api/board?status=running")).json<{ sessions: Session[] }>()).sessions;
+  expect(await read()).toMatchObject([{ id, completed_at: new Date(NOW).toISOString() }]);
+  await upload([{ ...original, observed_status: { state: "waiting", at: new Date(NOW + 2000).toISOString() } }]);
+  expect(await read()).toEqual([]);
+});

@@ -207,7 +207,7 @@ function sessionById(db: D1Database, userId: string, id: string) {
 }
 
 export async function listBoardSessions(db: D1Database, userId: string, status?: "running"): Promise<SessionRow[]> {
-  const filter = status === "running" ? "AND s.observed_state = 'running' AND s.completed_at IS NULL" : "";
+  const filter = status === "running" ? "AND s.observed_state = 'running' AND (s.completed_at IS NULL OR s.observed_at > s.completed_at)" : "";
   const sessions = await db.prepare(`${SELECT_SESSION} WHERE s.user_id = ? ${filter} ORDER BY s.ended_at DESC, s.id`)
     .bind(userId).all<SessionRow>();
   return sessions.results;

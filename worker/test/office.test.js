@@ -124,3 +124,10 @@ it("opens Sunday as a new calendar week including across a month and year bounda
     expect(sunday(day).getHours()).toBe(0);
   }
 });
+
+it("seats a completed session again only after a newer running observation", () => {
+  const done = "2026-11-22T10:00:00Z";
+  const session = at => ({ id: "resumed", completed_at: done, observed_status: { state: "running", at } });
+  expect(assignDesks(new Map(), [session(done)]).size).toBe(0);
+  expect(assignDesks(new Map(), [session("2026-11-22T10:01:00Z")]).get("resumed")).toBe(0);
+});
