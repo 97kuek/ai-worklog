@@ -7,10 +7,9 @@ use ai_worklog::adapters::fsutil;
 use ai_worklog::adapters::http::HttpSender;
 use ai_worklog::adapters::keychain;
 use ai_worklog::adapters::namer::{ClaudeCliNamer, Namer};
-use ai_worklog::app::collect::{acquire_lock, collect, CollectOptions};
+use ai_worklog::app::collect::{acquire_lock, collect_and_save, CollectOptions, SaveOptions};
 use ai_worklog::app::payload::DEFAULT_CHUNK;
 use ai_worklog::app::setup::{self, append_log_line};
-use ai_worklog::app::{ledger, state};
 
 use ai_worklog::app::output::{to_json, to_table};
 use ai_worklog::app::scan::{scan, ScanOptions};
@@ -86,7 +85,10 @@ fn run_collect() -> ExitCode {
     };
     let _lock = match acquire_lock(&home) {
         Ok(Some(l)) => l,
-        Ok(None) => return ExitCode::SUCCESS, // 別の collect が動いている
+        Ok(None) => {
+            eprintln!("ai-worklog: another collect is running");
+            return ExitCode::SUCCESS;
+        }
         Err(e) => {
             eprintln!("ai-worklog: cannot take lock in {}: {e}", home.display());
             return ExitCode::FAILURE;
@@ -99,11 +101,6 @@ fn run_collect() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let state_path = home.join("state.json");
-    let ledger_path = home.join("sent.json");
-    let mut state = state::load(&state_path);
-    let mut ledger = ledger::load(&ledger_path);
-    let first_run = state.files.is_empty() && ledger.sessions.is_empty();
     let sender = HttpSender {
         url: cfg.api_url.clone(),
         client_id: cfg.client_id.clone(),
@@ -126,13 +123,12 @@ fn run_collect() -> ExitCode {
         naming: cfg.naming.enabled.then_some((&namer as &dyn Namer, cfg.naming.min_user_messages, cfg.naming.max_per_run)),
         chunk: DEFAULT_CHUNK,
     };
-    let report = collect(&opts, &mut state, &mut ledger, &sender);
-    if let Err(e) = state::save(&state_path, &state) {
-        eprintln!("ai-worklog: cannot save state {}: {e}", state_path.display());
-    }
-    if let Err(e) = ledger::save(&ledger_path, &ledger) {
-        eprintln!("ai-worklog: cannot save ledger {}: {e}", ledger_path.display());
-    }
+    let save = SaveOptions {
+        home: &home,
+        token_expires_on: cfg.token_expires_on.as_deref(),
+        big_read_warn_bytes: BIG_READ_WARN_BYTES,
+    };
+    let report = collect_and_save(&opts, &save, &sender);
 
     let log_path = home.join("logs").join("collect.log");
     let mut line = serde_json::to_value(&report).unwrap_or_default();
@@ -143,10 +139,8 @@ fn run_collect() -> ExitCode {
         }
     };
     log(&line.to_string());
-    if report.bytes_read > BIG_READ_WARN_BYTES && !first_run {
-        let w = format!("read {} bytes in one run; state may have been reset", report.bytes_read);
-        log(&serde_json::json!({ "at": opts.now, "warning": w }).to_string());
-        eprintln!("ai-worklog: warning: {w}");
+    for w in report.errors.iter().filter(|e| e.starts_with("warning: ")) {
+        eprintln!("ai-worklog: {w}");
     }
     println!("{line}");
     if report.auth_failed { ExitCode::FAILURE } else { ExitCode::SUCCESS }

@@ -6,9 +6,10 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use super::setup::check_expiry;
 use super::payload::{chunk, session_fingerprint, to_ingest_json, ChunkLimits, Outgoing};
-use super::ledger::Ledger;
-use super::state::{FileEntry, State};
+use super::ledger::{self, Ledger};
+use super::state::{self, FileEntry, State};
 use crate::adapters::claude::{list_claude_files, merge_claude, read_claude_file, ClaudeFile, ClaudeFileState};
 use crate::adapters::codex::{list_codex_files, merge_codex, read_codex_file, read_thread_titles, CodexFileState, CodexRole};
 use crate::adapters::fsutil::create_private_dir;
@@ -62,6 +63,53 @@ pub fn collect(opts: &CollectOptions, state: &mut State, ledger: &mut Ledger, se
     }
     forget_user_texts(state, ledger, opts.naming.is_some());
     send_changed(opts, ledger, &built, sender, &mut report);
+    report
+}
+
+pub struct SaveOptions<'a> {
+    /// state.json と sent.json を置くフォルダ（~/.ai-worklog）
+    pub home: &'a Path,
+    /// config の token_expires_on（YYYY-MM-DD）
+    pub token_expires_on: Option<&'a str>,
+    /// 1回でこれより多く読んだら、状態が消えた疑いとして警告する
+    pub big_read_warn_bytes: u64,
+}
+
+/// state.json と sent.json を読み、collect し、何か変わったときだけ保存する。
+/// 警告は report.errors に足す（collect.log に残る）
+pub fn collect_and_save(opts: &CollectOptions, save: &SaveOptions, sender: &dyn Sender) -> CollectReport {
+    let state_path = save.home.join("state.json");
+    let ledger_path = save.home.join("sent.json");
+    let mut st = state::load(&state_path);
+    let mut led = ledger::load(&ledger_path);
+    let state_reset = st.load_error.is_some();
+    let load_failed = state_reset || led.load_error.is_some();
+    // 読み込みエラーで空になったときは初めての回とみなさない（大量に読んだ警告を出す）
+    let first_run = !state_reset && st.files.is_empty() && led.sessions.is_empty();
+    let sessions_before = led.sessions.clone();
+
+    let mut report = collect(opts, &mut st, &mut led, sender);
+
+    if state_reset {
+        report.errors.push("warning: file state was reset after a load error; all logs were read again".into());
+    }
+    if report.bytes_read > save.big_read_warn_bytes && !first_run {
+        report.errors.push(format!("warning: read {} bytes in one run; state may have been reset", report.bytes_read));
+    }
+    // 期限の記録がなければ (true, _)。過ぎているか30日以内なら警告する
+    if let (false, why) = check_expiry(save.token_expires_on, opts.now) {
+        report.errors.push(format!("warning: {why}"));
+    }
+    // 何も読まず、送った記録も変わらず、読み込みエラーもなければ書かない
+    if report.bytes_read == 0 && led.sessions == sessions_before && !load_failed {
+        return report;
+    }
+    if let Err(e) = state::save(&state_path, &st) {
+        report.errors.push(format!("cannot save state {}: {e}", state_path.display()));
+    }
+    if let Err(e) = ledger::save(&ledger_path, &led) {
+        report.errors.push(format!("cannot save ledger {}: {e}", ledger_path.display()));
+    }
     report
 }
 
@@ -1185,6 +1233,94 @@ mod tests {
         assert_eq!(report.files_read, 1);
         assert_eq!(sender.calls(), calls);
         assert_eq!(report.sessions_changed, 0);
+    }
+
+    fn mtime(p: &Path) -> std::time::SystemTime {
+        std::fs::metadata(p).unwrap().modified().unwrap()
+    }
+
+    /// ファイルの更新時刻を昔に戻す
+    fn age(p: &Path) {
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        std::fs::File::options().write(true).open(p).unwrap().set_modified(old).unwrap();
+    }
+
+    fn save_opts(home: &Path) -> SaveOptions<'_> {
+        SaveOptions { home, token_expires_on: None, big_read_warn_bytes: 500_000_000 }
+    }
+
+    #[test]
+    fn saves_only_when_something_changed() {
+        let env = Env::new("save_only_changed");
+        let home = env.root.join("home");
+        let (state_path, ledger_path) = (home.join("state.json"), home.join("sent.json"));
+        let sender = FakeSender::ok();
+        collect_and_save(&env.plain(), &save_opts(&home), &sender);
+        assert!(state_path.is_file() && ledger_path.is_file());
+        age(&state_path);
+        age(&ledger_path);
+        let (state_at, ledger_at) = (mtime(&state_path), mtime(&ledger_path));
+
+        // 何も読まず、何も送らない回は書かない
+        let report = collect_and_save(&env.plain(), &save_opts(&home), &sender);
+        assert_eq!(report, CollectReport::default());
+        assert_eq!(mtime(&state_path), state_at);
+        assert_eq!(mtime(&ledger_path), ledger_at);
+
+        // 読んだら書く
+        append_user_line(&env.s1(), "2026-11-20T03:05:00.000Z", "more");
+        collect_and_save(&env.plain(), &save_opts(&home), &sender);
+        assert_ne!(mtime(&state_path), state_at);
+        assert_ne!(mtime(&ledger_path), ledger_at);
+    }
+
+    #[test]
+    fn warns_about_reset_state_and_big_reads() {
+        let env = Env::new("warn_reset");
+        let home = env.root.join("home");
+        let warn_any = SaveOptions { home: &home, token_expires_on: None, big_read_warn_bytes: 1 };
+        let sender = FakeSender::ok();
+        let warnings = |r: &CollectReport| r.errors.iter().filter(|e| e.starts_with("warning:")).cloned().collect::<Vec<_>>();
+
+        // 初めての回は、たくさん読んでも警告しない
+        let first = collect_and_save(&env.plain(), &warn_any, &sender);
+        assert!(first.bytes_read > 1);
+        assert_eq!(warnings(&first), Vec::<String>::new());
+
+        // state.json が壊れて読み直した：読み直したことと、たくさん読んだことの両方を警告する
+        std::fs::write(home.join("state.json"), "garbage").unwrap();
+        let reset = collect_and_save(&env.plain(), &warn_any, &sender);
+        let w = warnings(&reset);
+        assert_eq!(w.len(), 2, "{:?}", reset.errors);
+        assert!(w[0].contains("state was reset"), "{w:?}");
+        assert!(w[1].contains(&format!("read {} bytes", reset.bytes_read)), "{w:?}");
+
+        // state.json が消えた（読み込みエラーなし）が、送った記録は残っている：初めての回ではない
+        std::fs::remove_file(home.join("state.json")).unwrap();
+        let gone = collect_and_save(&env.plain(), &warn_any, &sender);
+        let w = warnings(&gone);
+        assert_eq!(w.len(), 1, "{:?}", gone.errors);
+        assert!(w[0].contains("bytes in one run"), "{w:?}");
+    }
+
+    #[test]
+    fn warns_when_the_token_expires_soon() {
+        let env = Env::new("warn_expiry");
+        let home = env.root.join("home");
+        let sender = FakeSender::ok();
+        let opts = env.plain(); // now = 2026-11-22
+        let run = |expires: Option<&str>| {
+            let save = SaveOptions { home: &home, token_expires_on: expires, big_read_warn_bytes: u64::MAX };
+            collect_and_save(&opts, &save, &sender).errors.into_iter().filter(|e| e.starts_with("warning:")).collect::<Vec<_>>()
+        };
+        assert_eq!(run(None), Vec::<String>::new());
+        assert_eq!(run(Some("2027-06-01")), Vec::<String>::new());
+        let soon = run(Some("2026-12-01"));
+        assert_eq!(soon.len(), 1);
+        assert!(soon[0].contains("2026-12-01"), "{soon:?}");
+        let past = run(Some("2026-11-01"));
+        assert_eq!(past.len(), 1);
+        assert!(past[0].contains("expired"), "{past:?}");
     }
 
     #[test]

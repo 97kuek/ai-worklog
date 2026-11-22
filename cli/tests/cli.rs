@@ -90,3 +90,22 @@ fn login_rejects_missing_options() {
     assert!(!home.join("config.json").exists());
     let _ = std::fs::remove_dir_all(&home);
 }
+
+#[test]
+fn collect_says_so_and_exits_zero_when_another_collect_holds_the_lock() {
+    let home = temp_dir("collect-locked");
+    std::fs::write(
+        home.join("config.json"),
+        r#"{"api_url":"http://127.0.0.1:9/ingest","machine_name":"m","client_id":"test.access"}"#,
+    )
+    .unwrap();
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(home.join("collect.lock")).unwrap();
+    lock.try_lock().unwrap();
+    // ロックの後のキーチェーンや送信には進まない
+    let out = bin().arg("collect").env("AI_WORKLOG_HOME", &home).output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("another collect is running"), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(out.stdout.is_empty());
+    drop(lock);
+    let _ = std::fs::remove_dir_all(&home);
+}
