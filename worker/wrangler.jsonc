@@ -1,5 +1,6 @@
 {
-  "name": "ai-worklog",
+  "name": "taskfolio",
+  "build": { "command": "npm run build:ui", "watch_dir": "ui" },
   "main": "src/index.ts",
   "compatibility_date": "2026-11-20",
   "assets": {
