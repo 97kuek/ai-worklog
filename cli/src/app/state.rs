@@ -9,7 +9,7 @@ use crate::adapters::fsutil::write_atomically;
 
 pub const STATE_VERSION: u32 = 1;
 
-/// collect が続きから読むための、ファイルごとの途中結果。~/.ai-worklog/state.json に保存する。
+/// collect が続きから読むための、ファイルごとの途中結果。~/.taskfolio/state.json に保存する。
 /// 名前と送った記録は ledger（sent.json）にある
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -33,6 +33,10 @@ impl Default for State {
 pub struct FileEntry {
     pub path: PathBuf,
     pub offset: u64,
+    /// Older caches have aggregated usage but no turn observations.
+    pub status_scanned: bool,
+    /// Available main and child logs are reread once to recover per-model efforts.
+    pub efforts_scanned: bool,
     pub claude: Option<(String /*session_id*/, bool /*is_main*/, ClaudeFileState)>,
     pub codex: Option<CodexFileState>,
 }
@@ -47,7 +51,20 @@ pub fn load(path: &Path) -> State {
         Err(e) => return empty(format!("cannot read state {}: {e}", path.display())),
     };
     match serde_json::from_str::<State>(&text) {
-        Ok(s) if s.version == STATE_VERSION => s,
+        Ok(mut s) if s.version == STATE_VERSION => {
+            // A missing child log may survive only in an old cache. Keep its
+            // known models with unknown effort until the source can be reread.
+            for entry in s.files.values_mut().filter(|entry| !entry.efforts_scanned) {
+                let raw = entry.codex.as_mut().map(|st| &mut st.raw)
+                    .or_else(|| entry.claude.as_mut().map(|(_, _, st)| &mut st.raw));
+                if let Some(raw) = raw {
+                    raw.model_efforts.extend(raw.models.iter().cloned().map(|model| {
+                        crate::domain::ModelEffort { model, effort: None }
+                    }));
+                }
+            }
+            s
+        }
         Ok(s) => empty(format!("unsupported state version {} in {}", s.version, path.display())),
         Err(e) => empty(format!("invalid state {}: {e}", path.display())),
     }
@@ -109,7 +126,7 @@ mod tests {
         let mut s = State::default();
         s.files.insert(
             "1:2".into(),
-            FileEntry { path: "/x/a.jsonl".into(), offset: 42, claude: Some(("a".into(), true, Default::default())), codex: None },
+            FileEntry { path: "/x/a.jsonl".into(), offset: 42, status_scanned: true, efforts_scanned: true, claude: Some(("a".into(), true, Default::default())), codex: None },
         );
         save(&path, &s).unwrap();
         let back = load(&path);

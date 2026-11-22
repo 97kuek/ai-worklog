@@ -12,6 +12,8 @@ pub struct Config {
     pub naming: NamingConfig,
     #[serde(default = "default_gap")]
     pub gap_minutes: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills_cwd: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -39,15 +41,20 @@ impl Default for NamingConfig {
     }
 }
 
-/// `$AI_WORKLOG_HOME` if set, else `$HOME/.ai-worklog`.
+/// An explicit home wins. An existing installation keeps its state directory
+/// until the owner moves it to ~/.taskfolio.
+pub fn home_override() -> Option<PathBuf> {
+    ["TASKFOLIO_HOME", "AI_WORKLOG_HOME"].into_iter()
+        .find_map(|key| std::env::var_os(key).filter(|v| !v.is_empty()).map(PathBuf::from))
+}
+
 pub fn home_dir() -> PathBuf {
-    if let Some(h) = std::env::var_os("AI_WORKLOG_HOME")
-        && !h.is_empty()
-    {
-        return PathBuf::from(h);
-    }
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-    home.join(".ai-worklog")
+    home_override().unwrap_or_else(|| {
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+        let current = home.join(".taskfolio");
+        let legacy = home.join(".ai-worklog");
+        if !current.exists() && legacy.is_dir() { legacy } else { current }
+    })
 }
 
 pub fn load(path: &Path) -> Result<Config, String> {

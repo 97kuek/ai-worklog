@@ -9,7 +9,7 @@ use serde_json::value::RawValue;
 use super::claude::modified_at_or_after;
 use super::jsonl::{first_matching_line, for_each_matching_line, read_matching_lines_from};
 use super::time::parse_ts;
-use crate::domain::{RawSession, TokenEvent, TokenUsage, Tool};
+use crate::domain::{Millis, ObservedState, RawSession, StatusObservation, TokenEvent, TokenUsage, Tool};
 
 const NEEDLES: &[&str] = &[
     r#""type":"session_meta""#,
@@ -57,6 +57,10 @@ struct UserMessage {
 #[derive(Deserialize)]
 struct TurnContext {
     model: Option<String>,
+    #[serde(default)]
+    effort: serde_json::Value,
+    turn_id: Option<String>,
+    approvals_reviewer: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -120,11 +124,31 @@ pub struct CodexFileState {
     pub thread_id: Option<String>,
     /// 最初の session_meta で決まる
     pub role: Option<CodexRole>,
+    /// Current task_started context, retained across incremental reads.
+    pub turn_id: Option<String>,
+    pub final_answer_at: Option<Millis>,
+    review: Option<ReviewContext>,
     pub raw: RawSession,
     /// 累計値の前回の値（差分を出すため）
     pub last_totals: Totals,
     /// Main のファイルだけ、最大3件、各300文字まで
     pub user_texts: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReviewContext {
+    pub turn_id: String,
+    pub at: Millis,
+    pub human_since: Option<Millis>,
+}
+
+impl CodexFileState {
+    pub fn active_review(&self) -> Option<&ReviewContext> {
+        if self.raw.observed_status?.state != ObservedState::Running {
+            return None;
+        }
+        self.review.as_ref()
+    }
 }
 
 pub fn list_codex_files(codex_dir: &Path) -> Vec<PathBuf> {
@@ -160,37 +184,128 @@ fn apply_line(st: &mut CodexFileState, line: Line) {
         }
         "turn_context" => {
             if let Ok(tc) = serde_json::from_str::<TurnContext>(payload) {
-                st.raw.models.extend(tc.model);
+                if let Some(model) = tc.model {
+                    st.raw.record_model(model, tc.effort.as_str());
+                }
+                if matches!(st.role, Some(CodexRole::Main))
+                    && (tc.turn_id.is_none() || tc.turn_id == st.turn_id)
+                    && let Some(at) = at
+                    && st.raw.observed_status.is_some_and(|s| s.state == ObservedState::Running && at >= s.at)
+                    && st.review.as_ref().is_none_or(|last| at >= last.at)
+                    && let Some(turn_id) = &st.turn_id
+                {
+                    let human = tc.turn_id.is_some() && tc.approvals_reviewer.as_deref() == Some("user");
+                    let human_since = human.then(|| st.review.as_ref().and_then(|r| r.human_since).unwrap_or(at));
+                    st.review = Some(ReviewContext { turn_id: turn_id.clone(), at, human_since });
+                }
             }
         }
         "response_item" | "event_msg" => {
             let Some(at) = at else { return };
             st.raw.activity.push(at);
+            if matches!(st.role, Some(CodexRole::Main)) {
+                observe_turn(st, line.kind, at, payload);
+            }
             if line.kind != "event_msg" {
                 return;
             }
             if payload.contains("\"token_count\"") {
                 if let Ok(TokenCount { kind, info: Some(TokenInfo { total_token_usage: Some(t) }) }) =
                     serde_json::from_str::<TokenCount>(payload)
+                    && kind == "token_count"
                 {
-                    if kind == "token_count" {
-                        st.raw.token_events.push(TokenEvent { at, usage: t.minus(st.last_totals) });
-                        st.last_totals = t;
-                    }
+                    st.raw.token_events.push(TokenEvent { at, usage: t.minus(st.last_totals) });
+                    st.last_totals = t;
                 }
             } else if matches!(st.role, Some(CodexRole::Main))
                 && st.user_texts.len() < MAX_USER_TEXTS
                 && payload.contains("\"user_message\"")
+                && let Ok(UserMessage { kind, message: Some(m) }) = serde_json::from_str::<UserMessage>(payload)
+                && kind == "user_message" && !m.trim().is_empty()
             {
-                if let Ok(UserMessage { kind, message: Some(m) }) = serde_json::from_str::<UserMessage>(payload) {
-                    if kind == "user_message" && !m.trim().is_empty() {
-                        st.user_texts.push(m.chars().take(MAX_USER_TEXT_CHARS).collect());
-                    }
-                }
+                st.user_texts.push(m.chars().take(MAX_USER_TEXT_CHARS).collect());
             }
         }
         _ => {}
     }
+}
+
+#[derive(Deserialize)]
+struct TurnEvent {
+    #[serde(rename = "type")]
+    kind: String,
+    turn_id: Option<String>,
+    role: Option<String>,
+    phase: Option<String>,
+    last_agent_message: Option<String>,
+    message: Option<String>,
+    content: Option<Vec<Part>>,
+}
+#[derive(Deserialize)]
+struct Part {
+    #[serde(rename = "type")]
+    kind: String,
+    text: Option<String>,
+}
+
+impl TurnEvent {
+    fn is_final_answer(&self, envelope: &str) -> bool {
+        if self.phase.as_deref() != Some("final_answer") {
+            return false;
+        }
+        match (envelope, self.kind.as_str()) {
+            ("event_msg", "agent_message") => self.message.as_deref().is_some_and(|m| !m.trim().is_empty()),
+            ("response_item", "message") if self.role.as_deref() == Some("assistant") => {
+                self.content.iter().flatten().any(|p| {
+                    p.kind == "output_text" && p.text.as_deref().is_some_and(|text| !text.trim().is_empty())
+                })
+            }
+            _ => false,
+        }
+    }
+}
+
+/// A final_answer is evidence for the current turn's completion. Commentary,
+/// tool output and a final_answer alone do not indicate that the turn has stopped.
+fn observe_turn(st: &mut CodexFileState, envelope: &str, at: Millis, payload: &str) {
+    if st.raw.observed_status.is_some_and(|last| at < last.at)
+        || !["\"task_started\"", "\"task_complete\"", "\"turn_aborted\"", "\"final_answer\""]
+            .iter().any(|needle| payload.contains(needle))
+    {
+        return;
+    }
+    let Ok(event) = serde_json::from_str::<TurnEvent>(payload) else { return };
+    let different_turn = st.turn_id.is_some() && event.turn_id.is_some() && event.turn_id != st.turn_id;
+    let state = match (envelope, event.kind.as_str()) {
+        ("event_msg", "task_started") => {
+            st.turn_id = event.turn_id;
+            st.review = None;
+            st.final_answer_at = None;
+            ObservedState::Running
+        }
+        _ if different_turn => return,
+        ("event_msg", "turn_aborted") => {
+            st.final_answer_at = None;
+            ObservedState::Unknown
+        }
+        ("event_msg", "task_complete") => {
+            let answered = event.last_agent_message.is_some_and(|m| !m.trim().is_empty())
+                || st.final_answer_at.is_some_and(|final_at| final_at <= at);
+            // A completion with no matching start may still carry its own final message.
+            if st.turn_id.is_none() {
+                st.turn_id = event.turn_id;
+            }
+            if answered { ObservedState::Waiting } else { ObservedState::Unknown }
+        }
+        _ if event.is_final_answer(envelope) => {
+            if st.raw.observed_status.is_some_and(|s| s.state == ObservedState::Running) {
+                st.final_answer_at = Some(st.final_answer_at.map_or(at, |old| old.min(at)));
+            }
+            return;
+        }
+        _ => return,
+    };
+    st.raw.observed_status = Some(StatusObservation { state, at });
 }
 
 pub fn read_thread_titles(codex_dir: &Path) -> HashMap<String, String> {
@@ -302,9 +417,10 @@ fn apply_meta(raw: &mut RawSession, meta: SessionMeta) -> CodexRole {
 }
 
 fn role_of(meta: &SessionMeta) -> CodexRole {
+    let source = meta.source.as_ref().and_then(|s| s.get("subagent"));
     match meta.thread_source.as_deref() {
         Some("guardian_review") => CodexRole::Excluded,
-        Some("subagent") => meta
+        kind if kind == Some("subagent") || source.is_some() => meta
             .source
             .as_ref()
             .and_then(|s| s.pointer("/subagent/thread_spawn/parent_thread_id"))
@@ -345,6 +461,58 @@ fn collect_jsonl(dir: &Path, out: &mut Vec<PathBuf>) {
 mod tests {
     use super::*;
     use crate::domain::{build_session, TokenUsage, Tool};
+
+    #[test]
+    fn turn_completion_requires_a_final_response_from_the_same_turn() {
+        use ObservedState::*;
+        let mut st = CodexFileState::default();
+        let started = |id: &str| format!(r#"{{"type":"task_started","turn_id":"{id}"}}"#);
+        let completed = |id: &str| format!(r#"{{"type":"task_complete","turn_id":"{id}","last_agent_message":null}}"#);
+        let final_msg = r#"{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"final"}]}"#;
+        let commentary = r#"{"type":"agent_message","phase":"commentary","message":"progress"}"#;
+        observe_turn(&mut st, "event_msg", 1, &started("first"));
+        assert_eq!(st.raw.observed_status.unwrap().state, Running);
+        observe_turn(&mut st, "response_item", 2, final_msg);
+        assert_eq!(st.raw.observed_status.unwrap().state, Running);
+        // A restart between final_answer and task_complete retains the evidence.
+        st = serde_json::from_slice(&serde_json::to_vec(&st).unwrap()).unwrap();
+        observe_turn(&mut st, "event_msg", 3, &completed("first"));
+        assert_eq!(st.raw.observed_status.unwrap(), StatusObservation { state: Waiting, at: 3 });
+
+        observe_turn(&mut st, "event_msg", 4, &started("second"));
+        observe_turn(&mut st, "event_msg", 5, commentary);
+        observe_turn(&mut st, "event_msg", 6, &completed("first"));
+        observe_turn(&mut st, "response_item", 2, final_msg);
+        assert_eq!(st.raw.observed_status.unwrap(), StatusObservation { state: Running, at: 4 });
+        observe_turn(&mut st, "event_msg", 7, &completed("second"));
+        assert_eq!(st.raw.observed_status.unwrap().state, Unknown);
+
+        observe_turn(&mut st, "event_msg", 8, &started("third"));
+        observe_turn(&mut st, "event_msg", 9, r#"{"type":"task_complete","turn_id":"third","last_agent_message":"done"}"#);
+        assert_eq!(st.raw.observed_status.unwrap().state, Waiting);
+        observe_turn(&mut st, "event_msg", 10, &started("fourth"));
+        observe_turn(&mut st, "event_msg", 11, r#"{"type":"turn_aborted","turn_id":"fourth","reason":"interrupted"}"#);
+        assert_eq!(st.raw.observed_status.unwrap().state, Unknown);
+    }
+
+    #[test]
+    fn subagent_status_never_propagates_to_its_parent() {
+        let mut main = CodexFileState::default();
+        let mut child = CodexFileState::default();
+        for (st, id, source) in [(&mut main, "main", serde_json::json!("cli")),
+            (&mut child, "child", serde_json::json!({"subagent":{"thread_spawn":{"parent_thread_id":"main"}}}))]
+        {
+            let line = serde_json::json!({"type":"session_meta","payload":{"id":id,"source":source}}).to_string();
+            apply_line(st, serde_json::from_str(&line).unwrap());
+        }
+        let done = r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"task_complete","last_agent_message":"done"}}"#;
+        apply_line(&mut child, serde_json::from_str(done).unwrap());
+        let merged = merge_codex(&[&main, &child], &HashMap::new());
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].native_session_id, "main");
+        assert_eq!(merged[0].activity.len(), 1);
+        assert_eq!(merged[0].observed_status, None);
+    }
 
     fn load() -> Vec<RawSession> {
         let dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/codex"));

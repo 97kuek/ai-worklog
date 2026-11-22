@@ -7,3 +7,6 @@ pub mod config;
 pub mod keychain;
 pub mod http;
 pub mod fsutil;
+pub mod claude_live;
+pub mod status_hook;
+pub mod skills;

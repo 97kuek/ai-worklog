@@ -3,7 +3,19 @@ use jiff::Timestamp;
 use serde::Serialize;
 
 use crate::adapters::time::format_ts;
-use crate::domain::{Session, TokenUsage, Tool};
+use crate::domain::{ModelEffort, ObservedState, Session, StatusObservation, TokenUsage, Tool};
+
+#[derive(Serialize)]
+pub(super) struct StatusOut {
+    state: ObservedState,
+    at: String,
+}
+
+impl From<StatusObservation> for StatusOut {
+    fn from(status: StatusObservation) -> Self {
+        Self { state: status.state, at: format_ts(status.at) }
+    }
+}
 
 #[derive(Serialize)]
 struct SessionOut<'a> {
@@ -14,7 +26,11 @@ struct SessionOut<'a> {
     cwd: Option<&'a str>,
     git_branch: Option<&'a str>,
     models: &'a [String],
+    #[serde(skip_serializing_if = "<[ModelEffort]>::is_empty")]
+    model_efforts: &'a [ModelEffort],
     invoked_by: Option<Tool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    observed_status: Option<StatusOut>,
     started_at: String,
     ended_at: String,
     active_minutes: f64,
@@ -43,7 +59,9 @@ pub fn to_json(sessions: &[Session]) -> String {
             cwd: s.cwd.as_deref(),
             git_branch: s.git_branch.as_deref(),
             models: &s.models,
+            model_efforts: &s.model_efforts,
             invoked_by: s.invoked_by,
+            observed_status: s.observed_status.map(Into::into),
             started_at: format_ts(s.started_at),
             ended_at: format_ts(s.ended_at),
             active_minutes: (s.active_minutes * 100.0).round() / 100.0,
@@ -112,7 +130,9 @@ mod tests {
             cwd: Some("/tmp/demo".into()),
             git_branch: Some("main".into()),
             models: vec!["claude-haiku-5-5".into(), "claude-opus-5-5".into()],
+            model_efforts: vec![],
             invoked_by: None,
+            observed_status: None,
             started_at: start,
             ended_at: end,
             active_minutes: 60.083_333,

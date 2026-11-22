@@ -201,7 +201,7 @@ mod tests {
 
     #[test]
     fn cli_namer_isolates_claude_from_user_settings() {
-        let dir = std::env::temp_dir().join(format!("ai-worklog-namer-argv-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("taskfolio-namer-argv-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let argv = dir.join("argv.txt");
@@ -237,7 +237,7 @@ mod tests {
 
     #[test]
     fn cli_namer_tells_unavailable_from_unusable() {
-        let dir = std::env::temp_dir().join(format!("ai-worklog-namer-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("taskfolio-namer-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mk = |command: String, timeout_ms| ClaudeCliNamer {
             command,

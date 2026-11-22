@@ -6,9 +6,9 @@ use std::process::{Command, Stdio};
 use crate::adapters::config;
 use crate::adapters::http::HttpSender;
 use crate::adapters::keychain;
-use crate::domain::Millis;
+use crate::domain::{Millis, Tool};
 
-pub const LAUNCH_LABEL: &str = "dev.ai-worklog.collect";
+pub const LAUNCH_LABEL: &str = "dev.taskfolio.collect";
 const DAY_MS: i64 = 86_400_000;
 const EXPIRY_WARN_DAYS: i64 = 30;
 
@@ -16,7 +16,7 @@ fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
-/// launchd のジョブ定義。10分ごとと、ログイン時に `ai-worklog collect` を動かす。
+/// launchd のジョブ定義。10分ごとと、ログイン時に `taskfolio collect` を動かす。
 /// 報告は collect.log に残るので標準出力は捨て、標準エラーだけ launchd.log に残す
 pub fn launch_agent_plist(exe: &Path, home: &Path) -> String {
     let exe = xml_escape(&exe.display().to_string());
@@ -49,7 +49,7 @@ pub fn launch_agent_plist(exe: &Path, home: &Path) -> String {
   <true/>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>AI_WORKLOG_HOME</key>
+    <key>TASKFOLIO_HOME</key>
     <string>{home_s}</string>
     <key>PATH</key>
     <string>{path}</string>
@@ -64,26 +64,37 @@ pub fn launch_agent_plist(exe: &Path, home: &Path) -> String {
     )
 }
 
-fn session_end_snippet(exe: &Path, timeout: Option<u32>) -> String {
-    let mut hook = serde_json::json!({
-        "type": "command",
-        "command": format!("{} hook", exe.display()),
-    });
-    if let Some(t) = timeout {
-        hook["timeout"] = t.into();
+fn hooks_config(exe: &Path, tool: Tool) -> serde_json::Value {
+    use serde_json::json;
+    let path = exe.to_string_lossy();
+    let command = if path.bytes().all(|b| b.is_ascii_alphanumeric() || b"/_-.".contains(&b)) {
+        path.into_owned()
+    } else {
+        format!("'{}'", path.replace('\'', "'\\''"))
+    };
+    let (name, tool_events): (&str, &[&str]) = match tool {
+        Tool::ClaudeCode => ("claude", &["Notification", "PostToolBatch", "StopFailure"]),
+        Tool::Codex => ("codex", &["PermissionRequest", "PreModelRequest", "Interrupt"]),
+    };
+    let mut hooks = serde_json::Map::new();
+    let mut collect = json!({ "type": "command", "command": format!("{command} hook") });
+    if tool == Tool::Codex { collect["timeout"] = 3.into(); }
+    hooks.insert("SessionEnd".into(), json!([{ "hooks": [collect] }]));
+    let status = json!({"type": "command", "command": format!("{command} hook-status {name}"), "timeout": 3});
+    for event in ["UserPromptSubmit", "Stop"].iter().chain(tool_events) {
+        let mut group = json!({ "hooks": [&status] });
+        if *event == "Notification" { group["matcher"] = "permission_prompt".into(); }
+        hooks.insert((*event).into(), json!([group]));
     }
-    let v = serde_json::json!({ "hooks": { "SessionEnd": [ { "hooks": [hook] } ] } });
-    serde_json::to_string_pretty(&v).unwrap_or_default()
+    json!({ "hooks": hooks })
 }
 
-/// ~/.claude/settings.json の "hooks" に足す内容
 pub fn claude_hook_snippet(exe: &Path) -> String {
-    session_end_snippet(exe, None)
+    serde_json::to_string_pretty(&hooks_config(exe, Tool::ClaudeCode)).unwrap()
 }
 
-/// ~/.codex/hooks.json に足す内容（https://developers.openai.com/codex/hooks の SessionEnd の形。timeout は秒で最大3）
 pub fn codex_hook_snippet(exe: &Path) -> String {
-    session_end_snippet(exe, Some(3))
+    serde_json::to_string_pretty(&hooks_config(exe, Tool::Codex)).unwrap()
 }
 
 pub struct DoctorItem {
@@ -96,9 +107,11 @@ fn item(name: &'static str, ok: bool, detail: impl Into<String>) -> DoctorItem {
     DoctorItem { name, ok, detail: detail.into() }
 }
 
-/// launchctl の実行ファイル。テストでは AI_WORKLOG_LAUNCHCTL で差し替える
+/// launchctl の実行ファイル。テストでは TASKFOLIO_LAUNCHCTL で差し替える
 pub fn launchctl_cmd() -> String {
-    std::env::var("AI_WORKLOG_LAUNCHCTL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "launchctl".into())
+    ["TASKFOLIO_LAUNCHCTL", "AI_WORKLOG_LAUNCHCTL"].into_iter()
+        .find_map(|key| std::env::var(key).ok().filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| "launchctl".into())
 }
 
 /// `id -u`
@@ -113,8 +126,8 @@ pub fn launch_agents_dir() -> PathBuf {
 }
 
 pub fn doctor(home: &Path, claude_settings: &Path, codex_hooks: &Path, exe: &Path, now: Millis) -> Vec<DoctorItem> {
-    // AI_WORKLOG_HOME を指定しているときは検証用の環境なので launchctl を呼ばない
-    let use_launchctl = std::env::var_os("AI_WORKLOG_HOME").is_none_or(|v| v.is_empty());
+    // TASKFOLIO_HOME を指定しているときは検証用の環境なので launchctl を呼ばない
+    let use_launchctl = config::home_override().is_none();
     doctor_in(home, &launch_agents_dir(), claude_settings, codex_hooks, exe, now, use_launchctl)
 }
 
@@ -131,7 +144,7 @@ pub fn doctor_in(
     let cfg = config::load(&home.join("config.json"));
     items.push(match &cfg {
         Ok(c) => item("config", true, format!("{} ({})", c.api_url, c.machine_name)),
-        Err(e) => item("config", false, format!("{e} (run `ai-worklog login`)")),
+        Err(e) => item("config", false, format!("{e} (run `taskfolio login`)")),
     });
 
     let secret = match &cfg {
@@ -139,13 +152,13 @@ pub fn doctor_in(
         Err(_) => Err("no config".to_string()),
     };
     items.push(match &secret {
-        Ok(_) => item("keychain", true, format!("secret found (service {})", keychain::SERVICE)),
+        Ok(_) => item("keychain", true, "secret found"),
         Err(e) => item("keychain", false, e.clone()),
     });
 
     let plist = agents_dir.join(format!("{LAUNCH_LABEL}.plist"));
     items.push(if !plist.is_file() {
-        item("launch agent", false, format!("{} not found (run `ai-worklog setup`)", plist.display()))
+        item("launch agent", false, format!("{} not found (run `taskfolio setup`)", plist.display()))
     } else if !use_launchctl {
         item("launch agent", true, format!("{} present (launchctl not checked)", plist.display()))
     } else {
@@ -161,12 +174,12 @@ pub fn doctor_in(
         if loaded {
             item("launch agent", true, "loaded")
         } else {
-            item("launch agent", false, "plist exists but the job is not loaded (run `ai-worklog setup`)")
+            item("launch agent", false, "plist exists but the job is not loaded (run `taskfolio setup`)")
         }
     });
 
-    items.push(hook_item("claude hook", claude_settings, exe));
-    items.push(hook_item("codex hook", codex_hooks, exe));
+    items.push(hook_item("claude hook", claude_settings, exe, Tool::ClaudeCode));
+    items.push(hook_item("codex hook", codex_hooks, exe, Tool::Codex));
 
     items.push(match &cfg {
         Ok(c) if !c.naming.enabled => item("naming command", true, "naming disabled"),
@@ -204,23 +217,30 @@ pub fn doctor_in(
     items
 }
 
-fn hook_item(name: &'static str, file: &Path, exe: &Path) -> DoctorItem {
-    let want = format!("{} hook", exe.display());
-    let text = match std::fs::read_to_string(file) {
+fn hook_item(name: &'static str, file: &Path, exe: &Path, tool: Tool) -> DoctorItem {
+    let text = match std::fs::read(file) {
         Ok(t) => t,
         Err(e) => return item(name, false, format!("cannot read {}: {e}", file.display())),
     };
-    let found = serde_json::from_str::<serde_json::Value>(&text).ok().is_some_and(|v| {
-        v["hooks"]["SessionEnd"].as_array().is_some_and(|groups| {
-            groups.iter().any(|g| {
-                g["hooks"].as_array().is_some_and(|hs| hs.iter().any(|h| h["command"].as_str() == Some(want.as_str())))
-            })
-        })
-    });
-    if found {
-        item(name, true, format!("SessionEnd -> {want}"))
+    let Ok(configured) = serde_json::from_slice::<serde_json::Value>(&text) else {
+        return item(name, false, format!("invalid JSON in {}", file.display()));
+    };
+    let expected = hooks_config(exe, tool);
+    let mut missing = Vec::new();
+    for (event, groups) in expected["hooks"].as_object().unwrap() {
+        let wanted = &groups[0];
+        let found = configured["hooks"][event].as_array().is_some_and(|groups| groups.iter().any(|g| {
+            let matcher = g["matcher"].as_str().unwrap_or("");
+            (matcher.is_empty() || matcher == "*" || wanted["matcher"].as_str() == Some(matcher))
+                && g["hooks"].as_array().is_some_and(|hs| hs.iter().any(|h|
+                    h["type"] == "command" && h["command"] == wanted["hooks"][0]["command"]))
+        }));
+        if !found { missing.push(event.as_str()); }
+    }
+    if missing.is_empty() {
+        item(name, true, format!("registered in {}", file.display()))
     } else {
-        item(name, false, format!("no SessionEnd hook `{want}` in {}", file.display()))
+        item(name, false, format!("missing hooks in {}: {} (run `taskfolio setup --print-only`)", file.display(), missing.join(", ")))
     }
 }
 
@@ -296,19 +316,19 @@ mod tests {
 
     #[test]
     fn plist_runs_collect_every_ten_minutes() {
-        let p = launch_agent_plist(Path::new("/opt/bin/ai-worklog"), Path::new("/Users/x/.ai-worklog"));
+        let p = launch_agent_plist(Path::new("/opt/bin/taskfolio"), Path::new("/Users/x/.taskfolio"));
         for needle in [
-            "<string>/opt/bin/ai-worklog</string>",
+            "<string>/opt/bin/taskfolio</string>",
             "<string>collect</string>",
             "<integer>600</integer>",
             "RunAtLoad",
             "<key>ProcessType</key>",
             "<string>Background</string>",
             "LowPriorityIO",
-            "<string>dev.ai-worklog.collect</string>",
+            "<string>dev.taskfolio.collect</string>",
             // 報告は collect.log に残るので、標準出力は捨てる。標準エラーだけ launchd.log へ
             "<key>StandardOutPath</key>\n  <string>/dev/null</string>",
-            "<key>StandardErrorPath</key>\n  <string>/Users/x/.ai-worklog/logs/launchd.log</string>",
+            "<key>StandardErrorPath</key>\n  <string>/Users/x/.taskfolio/logs/launchd.log</string>",
         ] {
             assert!(p.contains(needle), "missing {needle}: {p}");
         }
@@ -322,29 +342,56 @@ mod tests {
 
     #[test]
     fn plist_escapes_xml_in_paths() {
-        let p = launch_agent_plist(Path::new("/a&b/<x>/ai-worklog"), Path::new("/h"));
-        assert!(p.contains("/a&amp;b/&lt;x&gt;/ai-worklog"), "{p}");
+        let p = launch_agent_plist(Path::new("/a&b/<x>/taskfolio"), Path::new("/h"));
+        assert!(p.contains("/a&amp;b/&lt;x&gt;/taskfolio"), "{p}");
     }
 
     #[test]
     fn claude_snippet_is_session_end_hook() {
-        let s = claude_hook_snippet(Path::new("/opt/bin/ai-worklog"));
+        let s = claude_hook_snippet(Path::new("/opt/bin/taskfolio"));
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v["hooks"]["SessionEnd"][0]["hooks"][0]["type"], "command");
-        assert_eq!(v["hooks"]["SessionEnd"][0]["hooks"][0]["command"], "/opt/bin/ai-worklog hook");
+        assert_eq!(v["hooks"]["SessionEnd"][0]["hooks"][0]["command"], "/opt/bin/taskfolio hook");
     }
 
     #[test]
     fn codex_snippet_is_session_end_hook() {
-        let s = codex_hook_snippet(Path::new("/opt/bin/ai-worklog"));
+        let s = codex_hook_snippet(Path::new("/opt/bin/taskfolio"));
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
-        assert_eq!(v["hooks"]["SessionEnd"][0]["hooks"][0]["command"], "/opt/bin/ai-worklog hook");
+        assert_eq!(v["hooks"]["SessionEnd"][0]["hooks"][0]["command"], "/opt/bin/taskfolio hook");
+    }
+
+    #[test]
+    fn snippets_register_supported_events_and_quote_shell_paths() {
+        let exe = Path::new("/tmp/a b'c/taskfolio");
+        let claude = hooks_config(exe, Tool::ClaudeCode);
+        assert_eq!(claude["hooks"]["Notification"][0]["matcher"], "permission_prompt");
+        assert_eq!(claude["hooks"]["PostToolBatch"][0]["hooks"][0]["command"], "'/tmp/a b'\\''c/taskfolio' hook-status claude");
+        let codex = hooks_config(exe, Tool::Codex);
+        assert!(codex["hooks"]["Notification"].is_null());
+        assert!(claude["hooks"]["PermissionRequest"].is_null());
+        for event in ["UserPromptSubmit", "Stop", "Interrupt", "PreModelRequest", "PermissionRequest"] {
+            assert!(codex["hooks"][event][0]["hooks"][0]["command"].as_str().unwrap().ends_with("hook-status codex"));
+        }
+    }
+
+    #[test]
+    fn doctor_identifies_hooks_missing_from_legacy_setup() {
+        let dir = temp("doctor-legacy");
+        let exe = Path::new("/tmp/taskfolio");
+        let mut config = hooks_config(exe, Tool::ClaudeCode);
+        config["hooks"].as_object_mut().unwrap().retain(|key, _| key == "SessionEnd");
+        let path = dir.join("settings.json");
+        std::fs::write(&path, config.to_string()).unwrap();
+        let item = hook_item("claude hook", &path, exe, Tool::ClaudeCode);
+        assert!(!item.ok && item.detail.contains("Notification") && !item.detail.contains("SessionEnd"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn doctor_reports_missing_pieces() {
         let d = temp("doctor-missing");
-        let items = doctor_in(&d, &d.join("LaunchAgents"), &d.join("settings.json"), &d.join("hooks.json"), Path::new("/opt/bin/ai-worklog"), 0, false);
+        let items = doctor_in(&d, &d.join("LaunchAgents"), &d.join("settings.json"), &d.join("hooks.json"), Path::new("/opt/bin/taskfolio"), 0, false);
         let names: Vec<&str> = items.iter().map(|i| i.name).collect();
         assert_eq!(
             names,
@@ -360,7 +407,7 @@ mod tests {
     #[test]
     fn doctor_detects_registered_hooks_and_plist() {
         let d = temp("doctor-ok");
-        let exe = Path::new("/opt/bin/ai-worklog");
+        let exe = Path::new("/opt/bin/taskfolio");
         std::fs::write(d.join("settings.json"), claude_hook_snippet(exe)).unwrap();
         std::fs::write(d.join("hooks.json"), codex_hook_snippet(exe)).unwrap();
         std::fs::create_dir_all(d.join("LA")).unwrap();

@@ -52,9 +52,25 @@ fn read_limited(resp: &mut ureq::http::Response<ureq::Body>) -> String {
 
 impl Sender for HttpSender {
     fn send(&self, body: &str) -> Result<SendOk, SendError> {
-        let agent = self.agent();
-        let url = format!("{}/api/sessions", self.url.trim_end_matches('/'));
-        let mut resp = agent
+        self.put("sessions", body)
+    }
+}
+
+impl HttpSender {
+    pub fn send_skills(&self, body: &str, count: usize) -> Result<(), SendError> {
+        #[derive(Deserialize)]
+        struct Received { skills: usize }
+        let received: Received = self.put("skills", body)?;
+        if received.skills == count {
+            Ok(())
+        } else {
+            Err(SendError::Rejected { status: 200, body: "unexpected received skill count".into() })
+        }
+    }
+
+    fn put<T: serde::de::DeserializeOwned>(&self, resource: &str, body: &str) -> Result<T, SendError> {
+        let url = format!("{}/api/{resource}", self.url.trim_end_matches('/'));
+        let mut resp = self.agent()
             .put(&url)
             .header("CF-Access-Client-Id", &self.client_id)
             .header("CF-Access-Client-Secret", &self.client_secret)
@@ -68,17 +84,14 @@ impl Sender for HttpSender {
             _ => {
                 let text = read_limited(&mut resp);
                 if (200..=299).contains(&status) {
-                    serde_json::from_str::<SendOk>(&text)
-                        .map_err(|_| SendError::Rejected { status, body: text })
+                    serde_json::from_str(&text).map_err(|_| SendError::Rejected { status, body: text })
                 } else {
                     Err(SendError::Rejected { status, body: text })
                 }
             }
         }
     }
-}
 
-impl HttpSender {
     /// `GET {url}/api/me`。成功したら `{"kind": ...}` の kind を返す
     pub fn check_me(&self) -> Result<String, SendError> {
         let url = format!("{}/api/me", self.url.trim_end_matches('/'));
@@ -195,6 +208,18 @@ mod tests {
         assert!(lower.contains("cf-access-client-secret: the-secret-value"), "{req}");
         assert!(lower.contains("content-type: application/json"), "{req}");
         assert!(req.ends_with(r#"{"a":1}"#), "{req}");
+    }
+
+    #[test]
+    fn sends_skills_with_auth_and_requires_count_acknowledgement() {
+        for (count, accepted) in [(1, true), (0, false)] {
+            let (url, request) = serve(resp("200 OK", "", &format!(r#"{{"skills":{count}}}"#)));
+            assert_eq!(sender(url).send_skills("{}", 1).is_ok(), accepted);
+            let request = request.join().unwrap().to_lowercase();
+            assert!(request.starts_with("put /api/skills "));
+            assert!(request.contains("cf-access-client-id: the-id.access"));
+            assert!(request.contains("cf-access-client-secret: the-secret-value"));
+        }
     }
 
     #[test]

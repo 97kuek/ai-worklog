@@ -2,24 +2,27 @@ use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, SystemTime};
 
-use ai_worklog::adapters::config::{self, Config};
-use ai_worklog::adapters::fsutil;
-use ai_worklog::adapters::http::HttpSender;
-use ai_worklog::adapters::keychain;
-use ai_worklog::adapters::namer::{ClaudeCliNamer, Namer};
-use ai_worklog::app::collect::{acquire_lock, collect_and_save, CollectOptions, SaveOptions};
-use ai_worklog::app::payload::DEFAULT_CHUNK;
-use ai_worklog::app::setup::{self, append_log_line};
+use taskfolio::adapters::config::{self, Config};
+use taskfolio::adapters::fsutil;
+use taskfolio::adapters::http::HttpSender;
+use taskfolio::adapters::{keychain, status_hook};
+use taskfolio::domain::Tool;
+use taskfolio::adapters::namer::{ClaudeCliNamer, Namer};
+use taskfolio::app::collect::{acquire_lock, collect_and_save, CollectOptions, SaveOptions};
+use taskfolio::app::payload::DEFAULT_CHUNK;
+use taskfolio::app::setup::{self, append_log_line};
 
-use ai_worklog::app::output::{to_json, to_table};
-use ai_worklog::app::scan::{scan, ScanOptions};
+use taskfolio::app::output::{to_json, to_table};
+use taskfolio::app::scan::{scan, ScanOptions};
 
-const USAGE: &str = "usage: ai-worklog <scan|collect|login|setup|hook|doctor|--version>
+const USAGE: &str = "usage: taskfolio <scan|skills|collect|login|setup|hook|hook-status|doctor|--version>
   scan [--since-days N] [--gap-minutes N] [--format json|table] [--claude-dir PATH] [--codex-dir PATH]
-  collect
+  skills [--cwd PATH]
+  collect [--rescan]
   login --url API_URL --machine-name NAME --client-id ID [--expires YYYY-MM-DD]
   setup [--print-only]
   hook
+  hook-status <claude|codex>
   doctor";
 
 const LOG_MAX_BYTES: u64 = 1024 * 1024;
@@ -29,37 +32,78 @@ fn main() -> ExitCode {
     let mut parser = lexopt::Parser::from_env();
     match parser.next() {
         Ok(Some(lexopt::Arg::Long("version"))) => {
-            println!("ai-worklog {}", env!("CARGO_PKG_VERSION"));
+            println!("taskfolio {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
         Ok(Some(lexopt::Arg::Value(cmd))) if cmd == "scan" => match run_scan(parser) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("ai-worklog: {e}");
+                eprintln!("taskfolio: {e}");
                 usage_error()
             }
         },
-        Ok(Some(lexopt::Arg::Value(cmd))) if cmd == "collect" => {
-            if parser.next().ok().flatten().is_some() {
-                return usage_error();
+        Ok(Some(lexopt::Arg::Value(cmd))) if cmd == "skills" => {
+            let cwd = match parser.next() {
+                Ok(None) => config::load(&config::home_dir().join("config.json")).ok()
+                    .and_then(|cfg| cfg.skills_cwd).unwrap_or_else(user_home),
+                Ok(Some(lexopt::Arg::Long("cwd"))) => match parser.value() {
+                    Ok(value) if matches!(parser.next(), Ok(None)) => PathBuf::from(value),
+                    _ => return usage_error(),
+                },
+                _ => return usage_error(),
+            };
+            let mut skills = Vec::new();
+            for (tool, name) in taskfolio::adapters::skills::TOOLS {
+                match taskfolio::adapters::skills::discover(tool, &cwd) {
+                    Ok(rows) => skills.extend(rows),
+                    Err(reason) => {
+                        eprintln!("taskfolio: {name} skills: {reason}");
+                        return ExitCode::FAILURE;
+                    }
+                }
             }
-            run_collect()
+            println!("{}", serde_json::json!({"skills":skills}));
+            ExitCode::SUCCESS
+        }
+        Ok(Some(lexopt::Arg::Value(cmd))) if cmd == "collect" => {
+            let rescan = match parser.next() {
+                Ok(None) => false,
+                Ok(Some(lexopt::Arg::Long("rescan"))) => {
+                    if !matches!(parser.next(), Ok(None)) { return usage_error(); }
+                    true
+                }
+                _ => return usage_error(),
+            };
+            run_collect(rescan)
         }
         Ok(Some(lexopt::Arg::Value(cmd))) if cmd == "login" => match run_login(parser) {
             Ok(code) => code,
             Err(e) => {
-                eprintln!("ai-worklog: {e}");
+                eprintln!("taskfolio: {e}");
                 usage_error()
             }
         },
         Ok(Some(lexopt::Arg::Value(cmd))) if cmd == "setup" => match run_setup(parser) {
             Ok(code) => code,
             Err(e) => {
-                eprintln!("ai-worklog: {e}");
+                eprintln!("taskfolio: {e}");
                 usage_error()
             }
         },
         Ok(Some(lexopt::Arg::Value(cmd))) if cmd == "hook" => run_hook(),
+        Ok(Some(lexopt::Arg::Value(cmd))) if cmd == "hook-status" => {
+            let tool = match parser.next() {
+                Ok(Some(lexopt::Arg::Value(name))) if name == "claude" => Tool::ClaudeCode,
+                Ok(Some(lexopt::Arg::Value(name))) if name == "codex" => Tool::Codex,
+                _ => return usage_error(),
+            };
+            if !matches!(parser.next(), Ok(None)) { return usage_error(); }
+            // Observing a session must never affect the tool's approval or control flow.
+            if status_hook::record(&config::home_dir(), tool, std::io::stdin().lock()).is_err() {
+                eprintln!("taskfolio: could not record hook status");
+            }
+            ExitCode::SUCCESS
+        }
         Ok(Some(lexopt::Arg::Value(cmd))) if cmd == "doctor" => run_doctor(),
         _ => usage_error(),
     }
@@ -73,31 +117,31 @@ fn user_home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
 }
 
-fn run_collect() -> ExitCode {
+fn run_collect(rescan: bool) -> ExitCode {
     let home = config::home_dir();
     let cfg = match config::load(&home.join("config.json")) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("ai-worklog: {e}");
-            eprintln!("ai-worklog: run `ai-worklog login --url <API_URL> --machine-name <NAME> --client-id <ID>` first");
+            eprintln!("taskfolio: {e}");
+            eprintln!("taskfolio: run `taskfolio login --url <API_URL> --machine-name <NAME> --client-id <ID>` first");
             return ExitCode::from(2);
         }
     };
     let _lock = match acquire_lock(&home) {
         Ok(Some(l)) => l,
         Ok(None) => {
-            eprintln!("ai-worklog: another collect is running");
-            return ExitCode::SUCCESS;
+            eprintln!("taskfolio: another collect is running");
+            return if rescan { ExitCode::FAILURE } else { ExitCode::SUCCESS };
         }
         Err(e) => {
-            eprintln!("ai-worklog: cannot take lock in {}: {e}", home.display());
+            eprintln!("taskfolio: cannot take lock in {}: {e}", home.display());
             return ExitCode::FAILURE;
         }
     };
     let secret = match keychain::read_secret(&cfg.client_id) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("ai-worklog: {e}");
+            eprintln!("taskfolio: {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -115,6 +159,7 @@ fn run_collect() -> ExitCode {
     };
     let user = user_home();
     let opts = CollectOptions {
+        rescan,
         claude_projects_dir: user.join(".claude/projects"),
         codex_dir: user.join(".codex"),
         machine_name: cfg.machine_name.clone(),
@@ -128,22 +173,28 @@ fn run_collect() -> ExitCode {
         token_expires_on: cfg.token_expires_on.as_deref(),
         big_read_warn_bytes: BIG_READ_WARN_BYTES,
     };
-    let report = collect_and_save(&opts, &save, &sender);
+    let mut report = collect_and_save(&opts, &save, &sender);
+    let skills_cwd = cfg.skills_cwd.as_deref().unwrap_or(&user);
+    taskfolio::app::skills::sync(&home, skills_cwd, opts.now, &sender, &mut report);
 
     let log_path = home.join("logs").join("collect.log");
     let mut line = serde_json::to_value(&report).unwrap_or_default();
     line["at"] = opts.now.into();
     let log = |l: &str| {
         if let Err(e) = append_log_line(&log_path, l, LOG_MAX_BYTES) {
-            eprintln!("ai-worklog: cannot write {}: {e}", log_path.display());
+            eprintln!("taskfolio: cannot write {}: {e}", log_path.display());
         }
     };
     log(&line.to_string());
     for w in report.errors.iter().filter(|e| e.starts_with("warning: ")) {
-        eprintln!("ai-worklog: {w}");
+        eprintln!("taskfolio: {w}");
     }
     println!("{line}");
-    if report.auth_failed { ExitCode::FAILURE } else { ExitCode::SUCCESS }
+    if report.auth_failed || (rescan && report.errors.iter().any(|e| !e.starts_with("warning: "))) {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 fn run_login(mut parser: lexopt::Parser) -> Result<ExitCode, lexopt::Error> {
@@ -176,20 +227,21 @@ fn run_login(mut parser: lexopt::Parser) -> Result<ExitCode, lexopt::Error> {
         token_expires_on: expires.or_else(|| prev.as_ref().and_then(|p| p.token_expires_on.clone())),
         naming: prev.as_ref().map(|p| p.naming.clone()).unwrap_or_default(),
         gap_minutes: prev.as_ref().map_or(30, |p| p.gap_minutes),
+        skills_cwd: prev.and_then(|p| p.skills_cwd),
     };
     if let Err(e) = config::save(&path, &cfg) {
-        eprintln!("ai-worklog: cannot write {}: {e}", path.display());
+        eprintln!("taskfolio: cannot write {}: {e}", path.display());
         return Ok(ExitCode::FAILURE);
     }
     println!("wrote {}", path.display());
     println!("Enter the Client Secret when the Keychain prompt asks for it (it is not echoed or stored anywhere else).");
     match keychain::store_secret_interactive(&client_id) {
         Ok(()) => {
-            println!("stored the Client Secret in the Keychain (service {}, account {client_id})", keychain::SERVICE);
+            println!("stored the Client Secret in the Keychain (service {})", keychain::SERVICE);
             Ok(ExitCode::SUCCESS)
         }
         Err(e) => {
-            eprintln!("ai-worklog: {e}");
+            eprintln!("taskfolio: {e}");
             Ok(ExitCode::FAILURE)
         }
     }
@@ -207,7 +259,7 @@ fn run_setup(mut parser: lexopt::Parser) -> Result<ExitCode, lexopt::Error> {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("ai-worklog: cannot find own path: {e}");
+            eprintln!("taskfolio: cannot find own path: {e}");
             return Ok(ExitCode::FAILURE);
         }
     };
@@ -243,16 +295,16 @@ fn run_setup(mut parser: lexopt::Parser) -> Result<ExitCode, lexopt::Error> {
         match loaded {
             Ok(()) => println!("installed and loaded {}", plist_path.display()),
             Err(e) => {
-                eprintln!("ai-worklog: {e}");
+                eprintln!("taskfolio: {e}");
                 return Ok(ExitCode::FAILURE);
             }
         }
     }
     println!();
-    println!("Add this to \"hooks\" in ~/.claude/settings.json (not edited by ai-worklog):");
+    println!("Merge the following hook entries into ~/.claude/settings.json:");
     println!("{}", setup::claude_hook_snippet(&exe));
     println!();
-    println!("Add this to ~/.codex/hooks.json (not edited by ai-worklog; format per https://developers.openai.com/codex/hooks):");
+    println!("Merge these entries into ~/.codex/hooks.json, then review them in /hooks or Settings > Hooks:");
     println!("{}", setup::codex_hook_snippet(&exe));
     Ok(ExitCode::SUCCESS)
 }

@@ -4,10 +4,11 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::adapters::fsutil::write_atomically;
+use crate::domain::{Millis, StatusObservation};
 
 pub const LEDGER_VERSION: u32 = 1;
 
-/// セッションごとに、付けた名前と最後に送った内容の記録。~/.ai-worklog/sent.json に保存する。
+/// セッションごとに、付けた名前と最後に送った内容の記録。~/.taskfolio/sent.json に保存する。
 /// state.json（ファイルごとの途中結果）とは別にして、そちらが壊れて読み直しても
 /// 「送ったものより小さくしない」守りと名前が残るようにする
 #[derive(Debug, Serialize, Deserialize)]
@@ -33,6 +34,12 @@ pub struct SessionEntry {
     pub title: Option<String>,
     pub name_attempts: u8,
     pub sent_fingerprint: Option<u64>,
+    /// Keep ephemeral hook / live observations through retries and process exits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_status: Option<StatusObservation>,
+    /// A conditional permission wait is valid only under this turn's human reviewer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_wait: Option<(String, Millis)>,
     /// 最後に送ったときのブロックの message_count の合計
     pub sent_messages: u64,
     /// 最後に送ったときの input + output + cache_read + cache_write
@@ -104,7 +111,7 @@ mod tests {
         let mut l = Ledger::default();
         l.sessions.insert(
             "claude_code:a".into(),
-            SessionEntry { title: Some("作業".into()), name_attempts: 1, sent_fingerprint: Some(u64::MAX), sent_messages: 9, sent_tokens: 1234 },
+            SessionEntry { title: Some("作業".into()), name_attempts: 1, sent_fingerprint: Some(u64::MAX), external_status: None, permission_wait: None, sent_messages: 9, sent_tokens: 1234 },
         );
         save(&path, &l).unwrap();
         let back = load(&path);
