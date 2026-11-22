@@ -1,5 +1,6 @@
 import type { Hono } from "hono";
 import type { AppEnv } from "../app";
+import { listRequests } from "./requests";
 import { completeSession, findSession, listBoardSessions, saveSessions, setManualTitle } from "../db/repo";
 import { LIMITS, parseIngestPayload } from "../domain/ingest";
 import { serializeBlock, serializeSession } from "./serialize";
@@ -51,7 +52,8 @@ export function registerSessionRoutes(app: Hono<AppEnv>, now: () => number): voi
     const status = c.req.query("status");
     if (status !== undefined && status !== "running") return c.json({ error: "invalid_status" }, 400);
     const sessions = await listBoardSessions(c.env.DB, principal.userId, status);
-    return c.json({ sessions: sessions.map(serializeSession) }, 200, { "Cache-Control": "private, no-store" });
+    const requests = status ? undefined : await listRequests(c.env.DB, principal.userId);
+    return c.json({ sessions: sessions.map(serializeSession), requests }, 200, { "Cache-Control": "private, no-store" });
   });
 
   app.get("/api/sessions/:id", async (c) => {

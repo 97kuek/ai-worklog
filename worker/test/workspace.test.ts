@@ -17,7 +17,7 @@ type Session = {
 };
 
 beforeEach(async () => {
-  await env.DB.batch(["blocks", "sessions", "machines", "users"].map((table) => env.DB.prepare(`DELETE FROM ${table}`)));
+  await env.DB.batch(["board_requests", "blocks", "sessions", "machines", "users"].map((table) => env.DB.prepare(`DELETE FROM ${table}`)));
 });
 
 async function setup() {
@@ -154,7 +154,7 @@ it("permits only owned, observed waiting sessions to be completed from the same 
   const other = { ...env, OWNER_EMAIL: "other@example.com" };
   const { app: otherApp, userToken, machineToken } = await testApp();
   const headers = { "Cf-Access-Jwt-Assertion": await userToken(other.OWNER_EMAIL), Origin: ORIGIN };
-  expect(await (await otherApp.request(ORIGIN + "/api/board", { headers }, other)).json()).toEqual({ sessions: [] });
+  expect(await (await otherApp.request(ORIGIN + "/api/board", { headers }, other)).json()).toEqual({ sessions: [], requests: [] });
   expect((await otherApp.request(ORIGIN + detail, { headers }, other)).status).toBe(404);
   expect((await otherApp.request(ORIGIN + path, { method: "POST", headers }, other)).status).toBe(404);
   const sameClientId = await machineToken();
@@ -247,6 +247,55 @@ it("validates manual names and permits only a same-origin request from the ownin
   expect((await board()).sessions[0]!.manual_title).toBeNull();
   expect((await request(path, user, valid)).status).toBe(200);
   expect((await board()).sessions[0]!.manual_title).toBe("🟣".repeat(100));
+});
+
+it("persists owner planning requests, retries additions and moves without starting a session", async () => {
+  const { request, user, machine } = await setup();
+  const id = crypto.randomUUID();
+  const path = "/api/board/requests/" + id;
+  const change = (body: object, token = user, origin = ORIGIN) => request(path, token, {
+    method: "PUT", headers: { Origin: origin, "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  expect((await change({ title: "Plan" }, machine)).status).toBe(403);
+  expect((await change({ title: "Plan" }, user, "https://other.example")).status).toBe(403);
+  expect((await change({ title: "  " })).status).toBe(400);
+  expect((await change({ stage: "queued" })).status).toBe(404);
+  const metadata = { engine: "codex", model: "GPT", effort: "high", project: "demo" };
+  for (const project of [null, "", "  "])
+    expect((await change({ title: "Plan", project })).status).toBe(400);
+  expect((await change({ title: "Plan" })).status).toBe(400);
+  expect((await change({ title: "Plan", project: "demo", engine: "invalid" })).status).toBe(400);
+  expect((await change({ title: "Plan", project: "demo", effort: "high" })).status).toBe(400);
+  expect((await change({ title: " Plan ", ...metadata })).status).toBe(200);
+  expect((await change({ title: "Plan", ...metadata, project: "other" })).status).toBe(409);
+  expect((await change({ title: "Different", ...metadata })).status).toBe(409);
+  expect((await change({ stage: "invalid" })).status).toBe(400);
+  expect((await change({ stage: "queued" })).status).toBe(200);
+  expect((await change({ title: "Plan", ...metadata })).status).toBe(200);
+  expect((await change({ stage: "queued" })).status).toBe(200);
+  expect(await (await request("/api/board")).json()).toEqual({ sessions: [], requests: [{ id, title: "Plan", ...metadata, stage: "queued" }] });
+  expect(await (await request("/api/board?status=running")).json()).toEqual({ sessions: [] });
+  expect((await change({ stage: "backlog" })).status).toBe(200);
+  expect(await (await request("/api/board")).json()).toEqual({ sessions: [], requests: [{ id, title: "Plan", ...metadata, stage: "backlog" }] });
+});
+
+it("saves planning edits and lane changes atomically, including retries and stale editors", async () => {
+  const { request } = await setup();
+  const id = crypto.randomUUID();
+  const put = (body: object) => request("/api/board/requests/" + id, undefined, {
+    method: "PUT", headers: { Origin: ORIGIN, "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  const fields = { title: "Original", project: "api", engine: "codex", model: "GPT", effort: "high" };
+  const original = { ...fields, stage: "backlog" };
+  const edited = { ...fields, title: "Updated", stage: "queued" };
+  expect((await put({ ...edited, expected: original })).status).toBe(404);
+  expect((await put(fields)).status).toBe(200);
+  expect((await put({ ...edited, project: null, expected: original })).status).toBe(400);
+  expect((await put({ ...edited, expected: original })).status).toBe(200);
+  expect((await put({ ...edited, expected: original })).status).toBe(200);
+  expect((await put({ ...original, title: "Stale", expected: original })).status).toBe(409);
+  expect(await (await request("/api/board")).json()).toMatchObject({ requests: [{ id, ...edited }] });
+  expect((await put({ ...original, expected: edited })).status).toBe(200);
 });
 
 it("shows resumed work in the office after manual completion while keeping the board completion", async () => {
