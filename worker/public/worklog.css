@@ -728,6 +728,7 @@ main:focus {
   border: 0;
 }
 .edit-title img { width: 16px; height: 16px; opacity: .72; }
+.skills-filter { display: flex; justify-content: flex-end; margin-bottom: 10px; }
 .title-editor { width: 100%; }
 .title-editor label { display: block; color: var(--muted); }
 .title-editor input {
@@ -750,3 +751,26 @@ main:focus {
 .restore-title { color: var(--muted); padding: 4px 0; margin-top: 4px; }
 .title-editor .title-error { margin: 6px 0 0; color: var(--ink); font-weight: 600; }
 .title-error:empty { display: none; }
+
+.filter-trigger {
+  min-height: 44px;
+  max-width: 100%;
+  padding: 7px 36px 7px 14px;
+  text-align: start;
+  border: 1px solid var(--line);
+  border-radius: var(--pill);
+  background: var(--white) url("/icons/lucide/chevron-down.svg") no-repeat right 10px center / 18px;
+}
+.filter-dialog {
+  width: min(21rem, calc(100% - 24px));
+  max-height: min(75vh, 32rem);
+  max-height: min(75dvh, 32rem);
+  padding: 0;
+}
+.filter-dialog[open] { display: flex; flex-direction: column; }
+.filter-heading { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; gap: 12px; border-bottom: 1px solid var(--line); }
+.filter-heading h2 { margin: 0; font-size: var(--type-heading); }
+.filter-options { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 4px 8px; }
+.filter-option { display: block; width: 100%; min-height: 44px; padding: 8px 32px 8px 10px; text-align: start; border-radius: 5px; }
+.filter-option[aria-selected="true"] { background: var(--paper) url("/icons/lucide/check.svg") no-repeat right 10px center / 16px; font-weight: 600; }
+@media (hover: hover) { .filter-option:hover { background-color: var(--paper); } }
