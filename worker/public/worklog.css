@@ -55,14 +55,11 @@ a {
 }
 /* Native keyboards and assistive input retain a visible focus indicator. */
 :focus-visible,
-:root[data-input="keyboard"] :focus,
-.date-control:has(input:focus-visible),
-:root[data-input="keyboard"] .date-control:focus-within {
+:root[data-input="keyboard"] :focus {
   outline: 2px solid var(--focus);
   outline-offset: var(--focus-offset, 2px);
 }
-:root[data-input="pointer"] :focus,
-:root[data-input="pointer"] .date-control:focus-within {
+:root[data-input="pointer"] :focus {
   outline: none;
 }
 button:disabled {
@@ -197,7 +194,7 @@ main {
 }
 .week-controls {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  grid-template-columns: auto minmax(0, 1fr) auto 6.75rem;
   width: min(100%, 28rem);
   align-items: center;
   gap: 4px;
@@ -216,21 +213,6 @@ main {
 }
 .date-range-compact {
   display: none;
-}
-.date-control input {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  opacity: 0;
-  cursor: pointer;
-}
-.date-control input::-webkit-calendar-picker-indicator {
-  position: absolute;
-  inset: 0;
-  width: auto;
-  height: auto;
-  cursor: pointer;
 }
 .this-week {
   color: var(--white);
@@ -659,6 +641,16 @@ dialog::backdrop {
 }
 
 @media (max-width: 520px) {
+  .week-controls {
+    grid-template-columns: auto minmax(0, 1fr) auto 5.875rem;
+  }
+  .week-controls .this-week {
+    margin-left: 0;
+    padding-inline: 4px;
+  }
+  .date-control {
+    padding-inline: 2px;
+  }
   .date-range-full {
     display: none;
   }
@@ -751,6 +743,35 @@ main:focus {
 .restore-title { color: var(--muted); padding: 4px 0; margin-top: 4px; }
 .title-editor .title-error { margin: 6px 0 0; color: var(--ink); font-weight: 600; }
 .title-error:empty { display: none; }
+
+.date-picker { width: min(22rem, calc(100% - 20px)); padding: 14px; }
+.picker-head, .picker-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.picker-month-year {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: var(--type-heading);
+  font-weight: 600;
+}
+.picker-year {
+  width: 4.5ch;
+  min-height: 40px;
+  padding: 0;
+  text-align: center;
+  border: 0;
+  border-bottom: 1px solid var(--line-strong);
+  border-radius: 0;
+  background: var(--white);
+}
+.picker-grid { width: 100%; table-layout: fixed; border-spacing: 0; margin: 12px 0; }
+.picker-grid td, .picker-grid th { padding: 0; }
+.picker-weekday { text-align: center; color: var(--muted); }
+.picker-day { --focus-offset: -3px; width: 100%; min-height: 44px; padding: 0; font-variant-numeric: tabular-nums; }
+.picker-day.outside { color: var(--muted); }
+.picker-grid td[aria-selected="true"] .picker-day { background: var(--paper); color: var(--accent); font-weight: 700; }
+.picker-day[aria-current="date"] { text-decoration: underline; text-underline-offset: 4px; }
+.picker-day:hover { background: var(--selected-fill); }
+.picker-footer { border-top: 1px solid var(--line); padding-top: 10px; }
 
 .filter-trigger {
   min-height: 44px;

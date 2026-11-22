@@ -279,3 +279,14 @@
     padding-inline-end: 7px;
   }
 }
+
+.work-calendar .cal-face { font-size: .875rem; }
+@container (max-height: 74px) {
+  .work-calendar .cal-face > .cal-model, .work-calendar .cal-line .cal-status { display: none; }
+}
+@container (min-width: 79px) and (max-width: 155px) {
+  .work-calendar .cal-line .cal-status { display: none; }
+}
+@container (max-height: 50px) {
+  .work-calendar .cal-task { white-space: nowrap; }
+}
