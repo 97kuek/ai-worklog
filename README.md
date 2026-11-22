@@ -63,22 +63,17 @@ The Worker builds the UI from `worker/ui/` during Wrangler development and deplo
 
 ## Run a queued request on your Mac
 
-Sign in from the collector on the Mac and install the Claude Code or Codex CLI you plan to use. Create `runner.json` alongside Taskfolio’s `config.json`. Each key in `projects` is a stable project name shown on the Board. Its value is the absolute path to the checkout or worktree on this Mac. Use distinct keys for different repositories, including ones whose folders have the same name. To move a checkout, update the path under the existing key. To add a project, add another key and path. The runner reads this file on each poll. Include the engines you want to run.
+Taskfolio currently serves one owner per Cloudflare deployment. Set up the protected Worker and D1 database for that owner, then enroll each Mac that will run work. Windows runners are not supported yet.
 
-```json
-{
-  "projects": { "taskfolio": "/Users/me/Projects/taskfolio" },
-  "executables": {
-    "codex": "/opt/homebrew/bin/codex",
-    "claude_code": "/Users/me/.local/bin/claude"
-  },
-  "codex_sandbox": "workspace-write"
-}
-```
+1. On the Mac, install the CLI from this repository with `cargo install --locked --path cli`. The default install location is `~/.cargo/bin/taskfolio`.
+2. Install and sign in to Claude Code or Codex on that Mac. Run `taskfolio login --url <worker-url> --machine-name <display-name> --client-id <access-service-token-id>` and enter the service-token secret when prompted. Taskfolio stores the secret in the macOS Keychain.
+3. From this repository, run `python3 scripts/install-runner.py "$HOME/.cargo/bin/taskfolio"` to start the runner at login. If you use a custom Taskfolio home, pass `--state-dir /absolute/path/to/state`.
+4. Run `taskfolio folder add`, choose a working folder in Finder, and wait for the next runner check-in. Use `taskfolio folder add --path /absolute/path --name project-key` for a named checkout. Each key identifies one folder on that Mac. Run the command again to add another folder.
+5. Open **Settings** using the gear in the header. Find the Mac by its display name, check its reported engines and press **Test connection**. A successful test means that Mac checked in after the request. An available engine means the runner found its executable; provider sign-in happens on the Mac. Use the switch beside a folder to pause or resume future requests on that Mac. An active session can finish.
 
-Build the updated CLI, install it at a stable path, and run `python3 scripts/install-runner.py /absolute/path/to/taskfolio` from this repository. For an installation with a custom Taskfolio home, pass `--state-dir /absolute/path/to/state`. The runner reuses the collector’s Cloudflare login and advertises the configured projects and engines while the Mac is awake and logged in.
+The browser only sees registered project keys. The mapping to absolute paths stays on each Mac in `runner.json` beside `config.json`. A project seen in a work log becomes runnable when a Mac registers its folder. If the `taskfolio` command is outside your shell’s PATH, use `"$HOME/.cargo/bin/taskfolio"` in its place.
 
-Choose a registered project and engine, then move the request from Backlog to Queued. The runner checks for work every 30 seconds while the Mac is awake and logged in. It executes one eligible request at a time in queue order. A queued request waits while its Mac is offline. You can return a waiting request to Backlog until a runner claims it. If execution fails, return the card to Backlog, correct its settings and queue it again. The Mac resolves the project folder and provider executable locally and reports the execution status to the Board. To disable future launches on this Mac, allow the current job to finish, then unload the agent with `launchctl bootout "gui/$(id -u)/dev.taskfolio.runner"` and remove its plist from `~/Library/LaunchAgents`.
+Choose a registered project and engine, then move the request from Backlog to Queued. The runner checks for work every 30 seconds while the Mac is awake and logged in. It executes one eligible request at a time in queue order. A queued request waits while its Mac is offline. You can return a waiting request to Backlog until a runner claims it. If execution fails, return the card to Backlog, correct its settings and queue it again. New configurations use Codex’s read-only sandbox. Set `codex_sandbox` to `workspace-write` in that Mac’s `runner.json` to allow Codex to edit its working folder. The Mac resolves the project folder and provider executable locally and reports the execution status to the Board. To disable future launches on this Mac, allow the current job to finish, then unload the agent with `launchctl bootout "gui/$(id -u)/dev.taskfolio.runner"` and remove its plist from `~/Library/LaunchAgents`.
 
 ## Session status
 
