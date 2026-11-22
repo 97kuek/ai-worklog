@@ -22,7 +22,7 @@ async function setup() {
     const res = await request(user);
     expect(res.status).toBe(200);
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
-    return (await res.json<{ skills: { tools: string[]; name: string; description: string }[] }>()).skills;
+    return (await res.json<{ skills: { tools: string[]; accounts: (string | null)[]; name: string; description: string }[] }>()).skills;
   }
   return { machine, user, machineToken, userToken, request, put, list };
 }
@@ -47,9 +47,9 @@ it("merges identical metadata, keeping descriptions distinct and sorting by name
   await put({ skills: [codex, alt, codex] });
   await put({ skills: [claude, earlier, codex] }, await machineToken("second.access"));
   expect(await list()).toEqual([
-    { tools: ["claude_code"], name: "audit", description: "Review code" },
-    { tools: ["codex"], name: "review", description: "Another review" },
-    { tools: ["claude_code", "codex"], name: "review", description: "Review code" },
+    { tools: ["claude_code"], accounts: [null], name: "audit", description: "Review code" },
+    { tools: ["codex"], accounts: [], name: "review", description: "Another review" },
+    { tools: ["claude_code", "codex"], accounts: [null], name: "review", description: "Review code" },
   ]);
 });
 
@@ -59,14 +59,36 @@ it("replaces just the declared tools on the uploading machine, including empty i
   await put({ skills: [{ ...codex, name: "second-machine" }] }, await machineToken("second.access"));
   await put({ tools: ["codex"], skills: [{ ...codex, description: "updated" }] });
   expect(await list()).toEqual([
-    { tools: ["claude_code"], name: "review", description: "Review code" },
-    { tools: ["codex"], name: "review", description: "updated" },
-    { tools: ["codex"], name: "second-machine", description: "Review code" },
+    { tools: ["claude_code"], accounts: [null], name: "review", description: "Review code" },
+    { tools: ["codex"], accounts: [], name: "review", description: "updated" },
+    { tools: ["codex"], accounts: [], name: "second-machine", description: "Review code" },
   ]);
   await put({ tools: ["claude_code"], skills: [] });
   expect((await list()).map(s => s.description)).toEqual(["updated", "Review code"]);
   await put({ skills: [] });
-  expect(await list()).toEqual([{ tools: ["codex"], name: "second-machine", description: "Review code" }]);
+  expect(await list()).toEqual([{ tools: ["codex"], accounts: [], name: "second-machine", description: "Review code" }]);
+});
+
+it("replaces snapshots by Claude account without attributing old or other-machine rows", async () => {
+  const { put, list, machineToken } = await setup();
+  const other = await machineToken("second.access");
+  const legacy = { ...claude, name: "legacy" };
+  await put({ skills: [codex, legacy] });
+  await put({ tools: ["claude_code"], skills: [legacy] }, other);
+  await put({ account: "w-claude", skills: [claude, legacy] });
+  expect(await list()).toEqual([
+    { tools: ["claude_code"], accounts: ["w-claude", null], name: "legacy", description: "Review code" },
+    { tools: ["claude_code", "codex"], accounts: ["w-claude"], name: "review", description: "Review code" },
+  ]);
+  await put({ account: "p-claude", tools: ["claude_code"], skills: [claude] });
+  expect((await list()).map(row => row.accounts)).toEqual([["w-claude", null], ["p-claude", "w-claude"]]);
+  await put({ tools: ["claude_code"], skills: [] }, other);
+  expect((await list())[0]?.accounts).toEqual(["w-claude"]);
+  await put({ account: "w-claude", skills: [] });
+  await put({ tools: ["claude_code"], skills: [] });
+  expect(await list()).toEqual([
+    { tools: ["claude_code", "codex"], accounts: ["p-claude"], name: "review", description: "Review code" },
+  ]);
 });
 
 it("isolates owners sharing the same database", async () => {
@@ -79,7 +101,7 @@ it("isolates owners sharing the same database", async () => {
   await put({ skills: [] });
   expect(await list()).toEqual([]);
   expect(await (await request(otherUser, undefined, other)).json()).toEqual({
-    skills: [{ tools: ["claude_code"], name: claude.name, description: claude.description }],
+    skills: [{ tools: ["claude_code"], accounts: [null], name: claude.name, description: claude.description }],
   });
 });
 
@@ -87,6 +109,9 @@ it("rejects invalid snapshots without changing the previous list", async () => {
   const { put, list, request, machine } = await setup();
   await put({ skills: [codex] });
   for (const payload of [
+    { account: "p-claude", tools: ["codex"], skills: [] },
+    { account: "w-claude", skills: [codex] }, { account: "invalid", skills: [] },
+    { skills: [{ ...claude, account: "w-claude" }] },
     {}, { skills: null }, { skills: Array(1025).fill(codex) },
     { skills: [claude], tools: ["codex"] }, { skills: [], tools: [] },
     { skills: [], tools: ["other"] }, { skills: [], tools: null },
@@ -96,7 +121,7 @@ it("rejects invalid snapshots without changing the previous list", async () => {
   ]) {
     expect((await request(machine, payload)).status).toBe(400);
   }
-  expect(await list()).toEqual([{ tools: ["codex"], name: codex.name, description: codex.description }]);
+  expect(await list()).toEqual([{ tools: ["codex"], accounts: [], name: codex.name, description: codex.description }]);
 });
 
 it("accepts a full snapshot and counts Unicode code points", async () => {
@@ -109,15 +134,16 @@ it("accepts a full snapshot and counts Unicode code points", async () => {
 
 it("rolls back the delete and earlier insert chunks when a later write fails", async () => {
   const { put, list, request, machine } = await setup();
-  await put({ skills: [codex] });
+  await put({ skills: [codex, claude] });
+  await put({ account: "w-claude", skills: [claude] });
   await env.DB.prepare(`CREATE TRIGGER fail_skill_insert BEFORE INSERT ON machine_skills
     WHEN NEW.name = 'fail' BEGIN SELECT RAISE(ABORT, 'test write failure'); END`).run();
   const spy = vi.spyOn(console, "error").mockImplementation(() => {});
   try {
-    const skills = Array.from({ length: 40 }, (_, i) => ({ ...codex, name: String(i) }));
-    skills.push({ ...codex, name: "fail" });
-    expect((await request(machine, { skills })).status).toBe(500);
-    expect(await list()).toEqual([{ tools: ["codex"], name: codex.name, description: codex.description }]);
+    const skills = Array.from({ length: 40 }, (_, i) => ({ ...claude, name: String(i) }));
+    skills.push({ ...claude, name: "fail" });
+    expect((await request(machine, { account: "p-claude", skills })).status).toBe(500);
+    expect(await list()).toEqual([{ tools: ["claude_code", "codex"], accounts: ["w-claude", null], name: codex.name, description: codex.description }]);
   } finally {
     spy.mockRestore();
     await env.DB.prepare("DROP TRIGGER fail_skill_insert").run();
