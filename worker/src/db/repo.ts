@@ -1,4 +1,4 @@
-import type { IngestPayload } from "../domain/ingest";
+import type { IngestPayload, ObservedStatus } from "../domain/ingest";
 
 /** Returns the id of the user with this email, creating it if needed (race-safe). */
 export async function ensureUser(db: D1Database, email: string, now: number): Promise<string> {
@@ -11,22 +11,22 @@ export async function ensureUser(db: D1Database, email: string, now: number): Pr
   return found.results[0]!.id;
 }
 
-/** Returns the id of the machine with this Access client id, creating it if needed (race-safe). */
+/** Resolves or registers this owner’s machine. A client id assigned to another owner cannot be reused. */
 export async function ensureMachine(
   db: D1Database,
   userId: string,
   accessClientId: string,
   now: number,
-): Promise<string> {
+): Promise<string | null> {
   const [, found] = await db.batch<{ id: string }>([
     db
       .prepare(
         "INSERT INTO machines (id, user_id, access_client_id, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(access_client_id) DO NOTHING",
       )
       .bind(crypto.randomUUID(), userId, accessClientId, now),
-    db.prepare("SELECT id FROM machines WHERE access_client_id = ?").bind(accessClientId),
+    db.prepare("SELECT id FROM machines WHERE access_client_id = ? AND user_id = ?").bind(accessClientId, userId),
   ]);
-  return found.results[0]!.id;
+  return found.results[0]?.id ?? null;
 }
 
 const SESSION_COLUMNS = [
@@ -36,6 +36,7 @@ const SESSION_COLUMNS = [
   "cwd",
   "git_branch",
   "models",
+  "model_efforts",
   "invoked_by",
   "started_at",
   "ended_at",
@@ -57,16 +58,17 @@ const BLOCK_COLUMNS = [
   "cache_write_tokens",
 ] as const;
 
-// `title` keeps the stored value when the new one is null.
-const sessionAssignments = SESSION_COLUMNS.map((c) =>
-  c === "title" ? "title = COALESCE(excluded.title, sessions.title)" : `${c} = excluded.${c}`,
-).join(", ");
-const sessionDiffers = SESSION_COLUMNS.map((c) =>
-  c === "title" ? "sessions.title IS NOT COALESCE(excluded.title, sessions.title)" : `sessions.${c} IS NOT excluded.${c}`,
-).join(" OR ");
+function sessionValue(c: typeof SESSION_COLUMNS[number]): string {
+  // Legacy clients omit model_efforts, and untitled uploads retain the previous title.
+  if (c === "title" || c === "model_efforts") return `COALESCE(excluded.${c}, sessions.${c})`;
+  return `excluded.${c}`;
+}
+const sessionAssignments = SESSION_COLUMNS.map((c) => `${c} = ${sessionValue(c)}`).join(", ");
+const sessionDiffers = SESSION_COLUMNS.map((c) => `sessions.${c} IS NOT ${sessionValue(c)}`).join(" OR ");
 const blockAssignments = BLOCK_COLUMNS.map((c) => `${c} = excluded.${c}`).join(", ");
 const blockDiffers = BLOCK_COLUMNS.map((c) => `blocks.${c} IS NOT excluded.${c}`).join(" OR ");
 
+const newerObservation = "excluded.observed_at IS NOT NULL AND (sessions.observed_at IS NULL OR excluded.observed_at > sessions.observed_at)";
 const SESSION_ID = "(SELECT id FROM sessions WHERE user_id = ? AND tool = ? AND native_session_id = ?)";
 
 /**
@@ -87,10 +89,13 @@ export async function saveSessions(
     stmts.push(
       db
         .prepare(
-          `INSERT INTO sessions (id, user_id, tool, native_session_id, ${SESSION_COLUMNS.join(", ")}, updated_at)
-           VALUES (?, ?, ?, ?, ${SESSION_COLUMNS.map(() => "?").join(", ")}, ?)
-           ON CONFLICT (user_id, tool, native_session_id) DO UPDATE SET ${sessionAssignments}, updated_at = excluded.updated_at
-           WHERE ${sessionDiffers}`,
+          `INSERT INTO sessions (id, user_id, tool, native_session_id, ${SESSION_COLUMNS.join(", ")}, observed_state, observed_at, updated_at)
+           VALUES (?, ?, ?, ?, ${SESSION_COLUMNS.map(() => "?").join(", ")}, ?, ?, ?)
+           ON CONFLICT (user_id, tool, native_session_id) DO UPDATE SET ${sessionAssignments},
+             observed_state = CASE WHEN ${newerObservation} THEN excluded.observed_state ELSE sessions.observed_state END,
+             observed_at = CASE WHEN ${newerObservation} THEN excluded.observed_at ELSE sessions.observed_at END,
+             updated_at = excluded.updated_at
+           WHERE ${sessionDiffers} OR (${newerObservation})`,
         )
         .bind(
           crypto.randomUUID(),
@@ -101,6 +106,7 @@ export async function saveSessions(
           s.cwd,
           s.git_branch,
           JSON.stringify(s.models),
+          s.model_efforts === undefined ? null : JSON.stringify(s.model_efforts),
           s.invoked_by,
           s.started_at,
           s.ended_at,
@@ -109,6 +115,8 @@ export async function saveSessions(
           s.tokens.output,
           s.tokens.cache_read,
           s.tokens.cache_write,
+          s.observed_status?.state ?? null,
+          s.observed_status?.at ?? null,
           now,
         ),
     );
@@ -150,22 +158,20 @@ export async function saveSessions(
   return { rowsChanged: results.reduce((n, r) => n + (r.meta.changes ?? 0), 0) };
 }
 
-/**
- * Longest block we expect: a block ends after a 30 minute gap, so nobody works 48 hours
- * without one. A block that started earlier than this before `from` is not looked for,
- * which lets the (user_id, started_at) index bound the scan to the requested range.
- */
-export const MAX_BLOCK_SPAN_MS = 48 * 3_600_000;
-
 export type SessionRow = {
   id: string;
   tool: string;
   title: string | null;
+  manual_title: string | null;
   project: string | null;
   git_branch: string | null;
   models: string;
+  model_efforts: string | null;
   invoked_by: string | null;
   machine_name: string | null;
+  observed_state: ObservedStatus["state"] | null;
+  observed_at: number | null;
+  completed_at: number | null;
   started_at: number;
   ended_at: number;
   active_minutes: number;
@@ -187,42 +193,81 @@ export type BlockRow = {
   cache_write_tokens: number;
 };
 
-/** The newest `sessions.updated_at` of this user; 0 when there is none. Used as the ETag. */
-export async function dataVersion(db: D1Database, userId: string): Promise<number> {
-  const row = await db
-    .prepare("SELECT MAX(updated_at) AS v FROM sessions WHERE user_id = ?")
-    .bind(userId)
-    .first<{ v: number | null }>();
-  return row?.v ?? 0;
+const SELECT_SESSION = `SELECT s.id, s.tool, s.title, s.manual_title, s.project, s.git_branch, s.models, s.model_efforts, s.invoked_by,
+    m.name AS machine_name, s.started_at, s.ended_at, s.active_minutes,
+    s.observed_state, s.observed_at, s.completed_at,
+    s.input_tokens, s.output_tokens, s.cache_read_tokens, s.cache_write_tokens
+  FROM sessions s JOIN machines m ON m.id = s.machine_id AND m.user_id = s.user_id`;
+
+const SELECT_BLOCK = `SELECT session_id, seq, started_at, ended_at, message_count,
+    input_tokens, output_tokens, cache_read_tokens, cache_write_tokens FROM blocks`;
+
+function sessionById(db: D1Database, userId: string, id: string) {
+  return db.prepare(`${SELECT_SESSION} WHERE s.user_id = ? AND s.id = ?`).bind(userId, id);
+}
+
+export async function listBoardSessions(db: D1Database, userId: string, status?: "running"): Promise<SessionRow[]> {
+  const filter = status === "running" ? "AND s.observed_state = 'running' AND s.completed_at IS NULL" : "";
+  const sessions = await db.prepare(`${SELECT_SESSION} WHERE s.user_id = ? ${filter} ORDER BY s.ended_at DESC, s.id`)
+    .bind(userId).all<SessionRow>();
+  return sessions.results;
+}
+
+export async function findSession(db: D1Database, userId: string, id: string) {
+  const [session, blocks] = await db.batch([
+    sessionById(db, userId, id),
+    db.prepare(`${SELECT_BLOCK} WHERE user_id = ? AND session_id = ? ORDER BY seq`).bind(userId, id),
+  ]);
+  return { session: session.results[0] as SessionRow | undefined, blocks: blocks.results as BlockRow[] };
+}
+
+export async function setManualTitle(
+  db: D1Database,
+  userId: string,
+  id: string,
+  title: string | null,
+  expected: string | null,
+  now: number,
+) {
+  const [, session] = await db.batch<SessionRow>([
+    db.prepare(`UPDATE sessions SET manual_title = ?, updated_at = MAX(updated_at, ?)
+      WHERE user_id = ? AND id = ? AND manual_title IS ? AND manual_title IS NOT ?`)
+      .bind(title, now, userId, id, expected, title),
+    sessionById(db, userId, id),
+  ]);
+  return session.results[0];
+}
+
+export async function completeSession(db: D1Database, userId: string, id: string, now: number) {
+  // The condition and the returned row share a transaction with respect to racing uploads/retries.
+  const [, session] = await db.batch<SessionRow>([
+    db.prepare(`UPDATE sessions SET completed_at = ?, updated_at = MAX(updated_at, ?)
+      WHERE user_id = ? AND id = ? AND observed_state = 'waiting' AND completed_at IS NULL`)
+      .bind(now, now, userId, id),
+    sessionById(db, userId, id),
+  ]);
+  return session.results[0];
 }
 
 /** Blocks overlapping [fromMs, toMs) in started_at order, and the sessions they belong to. */
-export async function findBlocks(
-  db: D1Database,
-  userId: string,
-  fromMs: number,
-  toMs: number,
-): Promise<{ sessions: SessionRow[]; blocks: BlockRow[] }> {
-  const where = "user_id = ? AND started_at >= ? AND started_at < ? AND ended_at >= ?";
-  const args = [userId, fromMs - MAX_BLOCK_SPAN_MS, toMs, fromMs] as const;
-  const [blocks, sessions] = await db.batch([
-    db
-      .prepare(
-        `SELECT session_id, seq, started_at, ended_at, message_count,
-                input_tokens, output_tokens, cache_read_tokens, cache_write_tokens
-         FROM blocks WHERE ${where} ORDER BY started_at, session_id, seq`,
-      )
-      .bind(...args),
-    db
-      .prepare(
-        `SELECT s.id, s.tool, s.title, s.project, s.git_branch, s.models, s.invoked_by, m.name AS machine_name,
-                s.started_at, s.ended_at, s.active_minutes,
-                s.input_tokens, s.output_tokens, s.cache_read_tokens, s.cache_write_tokens
-         FROM sessions s JOIN machines m ON m.id = s.machine_id
-         WHERE s.user_id = ? AND s.id IN (SELECT session_id FROM blocks WHERE ${where})
-         ORDER BY s.started_at, s.id`,
-      )
-      .bind(userId, ...args),
+export async function findBlocks(db: D1Database, userId: string, fromMs: number, toMs: number) {
+  // The second, disjoint range uses the partial index in 0004_long_blocks.
+  const twoDays = 172800000;
+  const recent = "user_id = ? AND started_at >= ? AND started_at < ? AND ended_at >= ?";
+  const long = `user_id = ? AND ended_at - started_at > ${twoDays} AND started_at < ? AND ended_at >= ?`;
+  const overlap = (select: string) => `${select} WHERE ${recent} UNION ALL ${select} WHERE ${long}`;
+  const cutoff = fromMs - twoDays;
+  const args = [userId, cutoff, toMs, fromMs, userId, cutoff, fromMs] as const;
+  const [blocks, sessions, version] = await db.batch([
+    db.prepare(`${overlap(SELECT_BLOCK)} ORDER BY started_at, session_id, seq`).bind(...args),
+    db.prepare(`${SELECT_SESSION}
+      WHERE s.user_id = ? AND s.id IN (${overlap("SELECT session_id FROM blocks")})
+      ORDER BY s.started_at, s.id`).bind(userId, ...args),
+    db.prepare("SELECT COALESCE(MAX(updated_at), 0) AS v FROM sessions WHERE user_id = ?").bind(userId),
   ]);
-  return { sessions: sessions!.results as SessionRow[], blocks: blocks!.results as BlockRow[] };
+  return {
+    sessions: sessions.results as SessionRow[],
+    blocks: blocks.results as BlockRow[],
+    version: (version.results[0] as { v: number }).v,
+  };
 }

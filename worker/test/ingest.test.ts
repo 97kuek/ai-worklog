@@ -12,6 +12,7 @@ it("accepts the contract example and converts timestamps", () => {
   expect(r.value.sessions[0].started_at).toBe(Date.UTC(2026, 10, 20, 1, 0, 0));
   expect(r.value.sessions[0].blocks[1].seq).toBe(1);
   expect(r.value.sessions[1].invoked_by).toBe("claude_code");
+  expect(r.value.sessions.map((s) => s.model_efforts)).toEqual(example.sessions.map((s) => s.model_efforts));
 });
 
 it("ignores unknown fields such as source_title", () => {
@@ -51,6 +52,14 @@ const session = (i: number) => {
 };
 
 const cases: [string, (p: any) => void, string][] = [
+  ["null model efforts", (p) => { p.sessions[0].model_efforts = null; }, "sessions[0].model_efforts"],
+  ["invalid pair", (p) => { p.sessions[0].model_efforts = ["high"]; }, "sessions[0].model_efforts[0]"],
+  ["empty model", (p) => { p.sessions[0].model_efforts[0].model = ""; }, "sessions[0].model_efforts[0].model"],
+  ["missing effort", (p) => { delete p.sessions[0].model_efforts[0].effort; }, "sessions[0].model_efforts[0].effort"],
+  ["null observation", (p) => { p.sessions[0].observed_status = null; }, "sessions[0].observed_status"],
+  ["completion as an observation", (p) => { p.sessions[0].observed_status = { state: "completed", at: "2026-11-20T01:00:00Z" }; }, "sessions[0].observed_status.state"],
+  ["missing observation time", (p) => { p.sessions[0].observed_status = { state: "running" }; }, "sessions[0].observed_status.at"],
+  ["invalid observation time", (p) => { p.sessions[0].observed_status = { state: "waiting", at: "now" }; }, "sessions[0].observed_status.at"],
   ["root is not an object", (p) => { p.__root = []; }, ""],
   ["machine_name empty", (p) => { p.machine_name = ""; }, "machine_name"],
   ["sessions empty", (p) => { p.sessions = []; }, "sessions"],
