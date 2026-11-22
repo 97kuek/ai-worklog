@@ -14,6 +14,15 @@ function chartCeiling(peakMs: number) {
   return (step ?? Math.ceil(peakMinutes / 240) * 240) * 60_000;
 }
 
+// Keep the selected scale when moving between dates or drilling into a day.
+let utilization = false;
+
+function percentage(value: number, total: number) {
+  if (!total) return "—";
+  const percent = 100 * value / total;
+  return percent > 0 && percent < 1 ? "<1%" : Math.round(percent) + "%";
+}
+
 function projectName(key: ProjectKey) {
   return key ?? "Unassigned";
 }
@@ -28,7 +37,7 @@ function projectTable(bucket: ActivityBucket) {
   const table = el("table", "stats-table project-table");
   table.setAttribute("aria-label", "Project activity");
   const header = table.createTHead().insertRow();
-  for (const label of ["Project", "Active time", "Tasks"]) {
+  for (const label of ["Project", "Active time", "Share", "Tasks"]) {
     const th = el("th", "", label);
     th.scope = "col";
     header.append(th);
@@ -38,49 +47,10 @@ function projectTable(bucket: ActivityBucket) {
     const row = body.insertRow();
     row.insertCell().textContent = projectName(key);
     row.insertCell().textContent = duration(entry.ms);
+    row.insertCell().textContent = percentage(entry.ms, bucket.ms);
     row.insertCell().textContent = String(entry.tasks.size);
   }
   return table;
-}
-
-interface ChartLine {
-  name: string;
-  style: string;
-  values: number[];
-}
-
-const svgNS = "http://www.w3.org/2000/svg";
-
-function drawTrend(lines: ChartLine[], ceiling: number, count: number, observed: number) {
-  const svg = document.createElementNS(svgNS, "svg");
-  svg.classList.add("stats-lines");
-  svg.setAttribute("aria-hidden", "true");
-  const paths = document.createElementNS(svgNS, "svg");
-  paths.setAttribute("viewBox", "0 0 100 100");
-  paths.setAttribute("preserveAspectRatio", "none");
-  svg.append(paths);
-  for (const line of lines) {
-    const points = line.values.slice(0, observed).map((ms, index) => ({
-      x: 100 * (index + 0.5) / count,
-      y: 100 * (1 - ms / ceiling),
-    }));
-    const path = document.createElementNS(svgNS, "polyline");
-    path.classList.add(line.style);
-    path.setAttribute("points", points.map(({ x, y }) => x + "," + y).join(" "));
-    paths.append(path);
-    // Mark the leading series at each observation, including a single available day.
-    if (line === lines[0] || points.length === 1) {
-      for (const { x, y } of points) {
-        const dot = document.createElementNS(svgNS, "circle");
-        dot.classList.add(line.style);
-        dot.setAttribute("cx", x + "%");
-        dot.setAttribute("cy", y + "%");
-        dot.setAttribute("r", "2.5");
-        svg.append(dot);
-      }
-    }
-  }
-  return svg;
 }
 
 interface StatsOptions {
@@ -103,7 +73,7 @@ export function renderStats(root: HTMLElement, data: WeekData, start: Date, end:
   const head = el("div", "stats-head");
   const title = el("h2", "", weekly ? "Active time by day" : "Active time by hour");
   const total = el("div", "stats-total");
-  total.append(el("strong", "", duration(stats.totalMs)));
+  total.append(el("span", "", "Total"), el("strong", "", duration(stats.totalMs)));
   head.append(title, total);
   const buckets = weekly ? stats.days : stats.hourlySlots.map(slot => slot.activity);
   const ceiling = weekly ? chartCeiling(Math.max(...buckets.map(b => b.ms))) : 3_600_000;
@@ -120,21 +90,9 @@ export function renderStats(root: HTMLElement, data: WeekData, start: Date, end:
   const plot = el("div", weekly ? "stats-plot weekly-plot" : "stats-plot");
   const axis = el("div", "stats-axis");
   axis.setAttribute("aria-hidden", "true");
-  for (const ms of [ceiling, ceiling / 2, 0]) axis.append(el("span", "", duration(ms)));
-  const projectLines = series.filter(group => group.keys.some(key => stats.period.projects.has(key))).map(group => ({
-    name: group.name,
-    style: "series-" + group.style,
-    values: buckets.map(bucket => group.keys.reduce((sum, key) => sum + (bucket.projects.get(key)?.ms ?? 0), 0)),
-  }));
-  const lines = projectLines.length === 1 ? projectLines : [
-    { name: "Total", style: "series-total", values: buckets.map(bucket => bucket.ms) },
-    ...projectLines,
-  ];
-  const now = Date.now();
-  const observed = weekly
-    ? buckets.filter((_, i) => +addDays(start, i) <= now).length
-    : stats.hourlySlots.filter(slot => slot.from <= now).length;
-  const area = el("div", "stats-line-area");
+  const gridLabels = utilization ? ["100%", "50%", "0%"] : [ceiling, ceiling / 2, 0].map(duration);
+  for (const label of gridLabels) axis.append(el("span", "", label));
+  const area = el("div", "stats-bars");
   area.setAttribute("role", "group");
   area.setAttribute("aria-label", title.textContent!);
   const ticks = el("div", "stats-ticks");
@@ -142,16 +100,30 @@ export function renderStats(root: HTMLElement, data: WeekData, start: Date, end:
   if (!weekly) {
     area.style.gridTemplateColumns = ticks.style.gridTemplateColumns = `repeat(${buckets.length}, minmax(0, 1fr))`;
   }
-  const targets = buckets.map((bucket, index) => {
+  const now = Date.now();
+  const bars = buckets.map((bucket, index) => {
     const button = el("button", "stats-hour");
     button.type = "button";
     const date = addDays(start, index);
-    const label = [weekly ? dayLabel.format(date) : hourLabels[index], index < observed ? duration(bucket.ms) : "Upcoming"];
-    for (const line of projectLines) {
-      if (line.values[index]) label.push(line.name + " " + duration(line.values[index]!));
+    const from = weekly ? +date : stats.hourlySlots[index]!.from;
+    const to = weekly ? +addDays(date, 1) : stats.hourlySlots[index]!.to;
+    const capacity = to - from;
+    const label = [weekly ? dayLabel.format(date) : hourLabels[index]];
+    if (from > now) label.push("Upcoming");
+    else label.push(duration(bucket.ms), percentage(bucket.ms, capacity) + " utilization");
+    const stack = el("span", "stats-stack");
+    stack.style.height = (100 * bucket.ms / (utilization ? capacity : ceiling)) + "%";
+    for (const group of series) {
+      const ms = group.keys.reduce((sum, key) => sum + (bucket.projects.get(key)?.ms ?? 0), 0);
+      if (!ms) continue;
+      const segment = el("span", "series-" + group.style);
+      segment.style.height = (100 * ms / bucket.ms) + "%";
+      stack.append(segment);
+      label.push(group.name + " " + duration(ms));
     }
     button.title = label.join(" · ");
     button.setAttribute("aria-label", button.title);
+    button.append(stack);
     if (weekly) {
       button.append(el("span", "stats-day-label", weekday.format(date)));
       button.onclick = () => options.openDay(date, named);
@@ -163,27 +135,38 @@ export function renderStats(root: HTMLElement, data: WeekData, start: Date, end:
     area.append(button);
     return button;
   });
-  area.append(drawTrend(lines, ceiling, buckets.length, observed));
   plot.append(axis, area);
   if (!weekly) plot.append(ticks);
   const legend = el("ul", "stats-legend");
-  legend.setAttribute("aria-label", "Chart legend");
-  for (const line of lines) {
+  legend.setAttribute("aria-label", "Projects in chart");
+  for (const group of series) {
+    if (!group.keys.some(key => stats.period.projects.has(key))) continue;
     const item = el("li");
-    const swatch = document.createElementNS(svgNS, "svg");
-    swatch.classList.add("stats-swatch");
-    swatch.setAttribute("viewBox", "0 0 24 8");
-    const sample = document.createElementNS(svgNS, "line");
-    sample.classList.add(line.style);
-    sample.setAttribute("x2", "24");
-    sample.setAttribute("y1", "4");
-    sample.setAttribute("y2", "4");
-    swatch.append(sample);
+    const swatch = el("span", "stats-swatch series-" + group.style);
     swatch.setAttribute("aria-hidden", "true");
-    item.append(swatch, line.name);
+    item.append(swatch, group.name);
     legend.append(item);
   }
-  chart.append(head, plot);
+  const scale = el("div", "stats-scale");
+  scale.setAttribute("role", "group");
+  scale.setAttribute("aria-label", "Vertical axis");
+  for (const [index, text] of ["Active time", "Utilization"].entries()) {
+    const button = el("button", "", text);
+    button.type = "button";
+    const usePercent = index === 1;
+    button.setAttribute("aria-pressed", String(utilization === usePercent));
+    button.onclick = () => {
+      if (utilization === usePercent) return;
+      utilization = usePercent;
+      renderStats(root, data, start, end, options);
+      root.querySelector<HTMLButtonElement>('.stats-scale [aria-pressed="true"]')?.focus();
+    };
+    scale.append(button);
+  }
+  chart.append(head, scale);
+  if (utilization) chart.append(el("p", "stats-scale-note",
+    weekly ? "Share of each full day spent active." : "Share of each full hour spent active."));
+  chart.append(plot);
   head.title = "Overlapping work counts once. Shared time is split equally between active projects.";
   if (legend.childElementCount) chart.append(legend);
 
@@ -208,7 +191,7 @@ export function renderStats(root: HTMLElement, data: WeekData, start: Date, end:
   models.append(modelHead, results);
   function selectHour(value: string) {
     select.setValue(value);
-    if (!weekly) targets.forEach((button, i) => button.setAttribute("aria-pressed", String(value === String(i))));
+    if (!weekly) bars.forEach((button, i) => button.setAttribute("aria-pressed", String(value === String(i))));
     const bucket = value === "" ? undefined : (weekly ? stats.hours : buckets)[Number(value)];
     selection.textContent = bucket ? duration(bucket.ms) : "";
     const selected = bucket ?? stats.period;
