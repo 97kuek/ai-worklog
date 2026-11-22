@@ -143,20 +143,30 @@ export async function claimLaunch(db: D1Database, user: string, machine: string,
 }
 
 export async function reportResult(db: D1Database, user: string, machine: string, attempt: string, state: string, error: string | null, now: number) {
-  const checks = [expireUnstarted(db, user, now)];
+  const statements = [expireUnstarted(db, user, now)];
   if (state === "running") {
     // A prepared job may be resumed from the Mac's journal after the owner
     // disabled its project. The runner waits for this acknowledgment to spawn.
-    checks.push(db.prepare(`UPDATE board_launches SET state='failed',error='project_disabled',state_since=?
+    statements.push(db.prepare(`UPDATE board_launches SET state='failed',error='project_disabled',state_since=?
       WHERE user_id=? AND machine_id=? AND attempt_id=? AND state='claimed'
         AND project IN (SELECT project FROM runner_project_settings WHERE machine_id=? AND enabled=0)`)
       .bind(now, user, machine, attempt, machine));
   }
+  statements.push(db.prepare(`UPDATE board_launches SET state=?,error=?,state_since=? WHERE user_id=? AND machine_id=? AND attempt_id=?
+    AND ((state='claimed' AND ? IN ('running','failed')) OR (state='running' AND ? IN ('failed','completed')))`)
+    .bind(state, error, now, user, machine, attempt, state, state));
+  if (state === "running") {
+    const activeMachine = `(SELECT machine_id FROM board_launches
+      WHERE user_id=? AND machine_id=? AND attempt_id=? AND state='running')`;
+    statements.push(
+      db.prepare(`UPDATE board_runners SET seen_at=? WHERE seen_at<? AND machine_id=${activeMachine}`)
+        .bind(now, now, user, machine, attempt),
+      db.prepare(`UPDATE machines SET test_acknowledged_at=? WHERE test_acknowledged_at IS NULL
+        AND test_requested_at<=? AND id=${activeMachine}`).bind(now, now, user, machine, attempt),
+    );
+  }
   const batch = await db.batch<{ state: string }>([
-    ...checks,
-    db.prepare(`UPDATE board_launches SET state=?,error=?,state_since=? WHERE user_id=? AND machine_id=? AND attempt_id=?
-      AND ((state='claimed' AND ? IN ('running','failed')) OR (state='running' AND ? IN ('failed','completed')))`)
-      .bind(state, error, now, user, machine, attempt, state, state),
+    ...statements,
     db.prepare("SELECT state FROM board_launches WHERE user_id=? AND machine_id=? AND attempt_id=?")
       .bind(user, machine, attempt),
   ]);
