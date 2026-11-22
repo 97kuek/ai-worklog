@@ -3,11 +3,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 use super::claude::modified_at_or_after;
-use super::jsonl::{first_matching_line, for_each_matching_line};
+use super::jsonl::{first_matching_line, for_each_matching_line, read_matching_lines_from};
 use super::time::parse_ts;
 use crate::domain::{RawSession, TokenEvent, TokenUsage, Tool};
 
@@ -44,6 +44,16 @@ struct GitInfo {
     branch: Option<String>,
 }
 
+const MAX_USER_TEXTS: usize = 3;
+const MAX_USER_TEXT_CHARS: usize = 300;
+
+#[derive(Deserialize)]
+struct UserMessage {
+    #[serde(rename = "type")]
+    kind: String,
+    message: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct TurnContext {
     model: Option<String>,
@@ -61,8 +71,8 @@ struct TokenInfo {
     total_token_usage: Option<Totals>,
 }
 
-#[derive(Deserialize, Clone, Copy, Default)]
-struct Totals {
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, Default)]
+pub struct Totals {
     #[serde(default)]
     input_tokens: u64,
     #[serde(default)]
@@ -95,68 +105,131 @@ impl Totals {
     }
 }
 
-enum Role {
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum CodexRole {
     Main,
     Subagent { parent: String },
     Excluded,
 }
 
-/// Reads Codex sessions (from `sessions/` and `archived_sessions/`) that
-/// have any file modified at or after `modified_since`. A parent and its subagent threads form one family that
-/// is read whole whenever any of its files is in the window, so the result
-/// for a session never depends on the window. Guardian review threads and
-/// subagents whose root session is missing are dropped.
-pub fn read_codex_sessions(codex_dir: &Path, modified_since: SystemTime) -> Vec<RawSession> {
-    let titles = read_titles(&codex_dir.join("session_index.jsonl"));
+/// 1つのrolloutファイルから読んだ分の途中結果。state ファイルに保存して続きから読むために使う
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CodexFileState {
+    pub thread_id: Option<String>,
+    /// 最初の session_meta で決まる
+    pub role: Option<CodexRole>,
+    pub raw: RawSession,
+    /// 累計値の前回の値（差分を出すため）
+    pub last_totals: Totals,
+    /// Main のファイルだけ、最大3件、各300文字まで
+    pub user_texts: Vec<String>,
+}
+
+pub fn list_codex_files(codex_dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
     // Archiving a conversation moves its rollout to archived_sessions/, and
     // its work should stay on the calendar.
-    let mut files = Vec::new();
     collect_jsonl(&codex_dir.join("sessions"), &mut files);
     collect_jsonl(&codex_dir.join("archived_sessions"), &mut files);
+    files
+}
 
-    // Pass 1: read only each file's session_meta to learn the family tree.
-    let headers: Vec<(PathBuf, String, Role)> = files
-        .into_iter()
-        .filter_map(|path| {
-            let (id, role) = read_header(&path)?;
-            Some((path, id, role))
-        })
-        .collect();
-    let roles: HashMap<&str, &Role> = headers.iter().map(|(_, id, r)| (id.as_str(), r)).collect();
-    let root_of = |id: &str| -> Option<String> {
-        let mut cur = id;
-        for _ in 0..32 {
-            match roles.get(cur)? {
-                Role::Main => return Some(cur.to_owned()),
-                Role::Subagent { parent } => cur = parent,
-                Role::Excluded => return None,
+/// from から読み、st に足す。戻り値は新しい読み終えた位置
+pub fn read_codex_file(path: &Path, from: u64, st: &mut CodexFileState) -> std::io::Result<u64> {
+    if st.raw.tool.is_none() {
+        st.raw.tool = Some(Tool::Codex);
+    }
+    read_matching_lines_from(path, from, NEEDLES, |bytes| {
+        let Ok(line) = serde_json::from_slice::<Line>(bytes) else { return };
+        apply_line(st, line);
+    })
+}
+
+fn apply_line(st: &mut CodexFileState, line: Line) {
+    let at = line.timestamp.and_then(parse_ts);
+    let payload = line.payload.map(RawValue::get).unwrap_or("null");
+    match line.kind {
+        // The first session_meta decides the thread; forks replay later ones.
+        "session_meta" if st.role.is_none() => {
+            if let Ok(meta) = serde_json::from_str::<SessionMeta>(payload) {
+                st.thread_id = Some(meta.id.clone());
+                st.role = Some(apply_meta(&mut st.raw, meta));
             }
         }
-        None
-    };
-    let wanted: HashSet<String> = headers
-        .iter()
-        .filter(|(path, _, _)| modified_at_or_after(path, modified_since))
-        .filter_map(|(_, id, _)| root_of(id))
-        .collect();
+        "turn_context" => {
+            if let Ok(tc) = serde_json::from_str::<TurnContext>(payload) {
+                st.raw.models.extend(tc.model);
+            }
+        }
+        "response_item" | "event_msg" => {
+            let Some(at) = at else { return };
+            st.raw.activity.push(at);
+            if line.kind != "event_msg" {
+                return;
+            }
+            if payload.contains("\"token_count\"") {
+                if let Ok(TokenCount { kind, info: Some(TokenInfo { total_token_usage: Some(t) }) }) =
+                    serde_json::from_str::<TokenCount>(payload)
+                {
+                    if kind == "token_count" {
+                        st.raw.token_events.push(TokenEvent { at, usage: t.minus(st.last_totals) });
+                        st.last_totals = t;
+                    }
+                }
+            } else if matches!(st.role, Some(CodexRole::Main))
+                && st.user_texts.len() < MAX_USER_TEXTS
+                && payload.contains("\"user_message\"")
+            {
+                if let Ok(UserMessage { kind, message: Some(m) }) = serde_json::from_str::<UserMessage>(payload) {
+                    if kind == "user_message" && !m.trim().is_empty() {
+                        st.user_texts.push(m.chars().take(MAX_USER_TEXT_CHARS).collect());
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
 
-    // Pass 2: read every file of every wanted family in full.
+pub fn read_thread_titles(codex_dir: &Path) -> HashMap<String, String> {
+    read_titles(&codex_dir.join("session_index.jsonl"))
+}
+
+/// Follows parent links up to 32 levels. None for Excluded threads and for
+/// chains that never reach a Main thread.
+fn root_in(roles: &HashMap<&str, &CodexRole>, id: &str) -> Option<String> {
+    let mut cur = id;
+    for _ in 0..32 {
+        match roles.get(cur)? {
+            CodexRole::Main => return Some(cur.to_owned()),
+            CodexRole::Subagent { parent } => cur = parent,
+            CodexRole::Excluded => return None,
+        }
+    }
+    None
+}
+
+/// 親子をたどって根ごとにまとめる。Excluded と、根が見つからない子は除く。
+/// session_meta をまだ読めていないファイル（role が None）は読み飛ばす
+pub fn merge_codex(files: &[&CodexFileState], titles: &HashMap<String, String>) -> Vec<RawSession> {
+    let known: Vec<(&str, &CodexRole, &CodexFileState)> = files
+        .iter()
+        .filter_map(|st| Some((st.thread_id.as_deref()?, st.role.as_ref()?, *st)))
+        .collect();
+    let roles: HashMap<&str, &CodexRole> = known.iter().map(|(id, r, _)| (*id, *r)).collect();
     let mut mains: HashMap<String, RawSession> = HashMap::new();
-    let mut children: Vec<(String, RawSession)> = Vec::new();
-    for (path, id, _) in &headers {
-        let Some(root) = root_of(id).filter(|r| wanted.contains(r)) else { continue };
-        let Some(raw) = read_file(path) else { continue };
+    let mut children: Vec<(String, &CodexFileState)> = Vec::new();
+    for (id, _, st) in &known {
+        let Some(root) = root_in(&roles, id) else { continue };
         if root == *id {
-            mains.insert(root, raw);
+            mains.insert(root, st.raw.clone());
         } else {
-            children.push((root, raw));
+            children.push((root, st));
         }
     }
     for (root, child) in children {
         if let Some(p) = mains.get_mut(&root) {
-            p.activity.extend(child.activity);
-            p.token_events.extend(child.token_events);
-            p.models.extend(child.models);
+            p.absorb(child.raw.clone());
         }
     }
     let mut out: Vec<RawSession> = mains
@@ -170,7 +243,44 @@ pub fn read_codex_sessions(codex_dir: &Path, modified_since: SystemTime) -> Vec<
     out
 }
 
-fn read_header(path: &Path) -> Option<(String, Role)> {
+/// Reads Codex sessions (from `sessions/` and `archived_sessions/`) that
+/// have any file modified at or after `modified_since`. A parent and its subagent threads form one family that
+/// is read whole whenever any of its files is in the window, so the result
+/// for a session never depends on the window. Guardian review threads and
+/// subagents whose root session is missing are dropped.
+pub fn read_codex_sessions(codex_dir: &Path, modified_since: SystemTime) -> Vec<RawSession> {
+    let titles = read_thread_titles(codex_dir);
+
+    // Pass 1: read only each file's session_meta to learn the family tree.
+    let headers: Vec<(PathBuf, String, CodexRole)> = list_codex_files(codex_dir)
+        .into_iter()
+        .filter_map(|path| {
+            let (id, role) = read_header(&path)?;
+            Some((path, id, role))
+        })
+        .collect();
+    let roles: HashMap<&str, &CodexRole> = headers.iter().map(|(_, id, r)| (id.as_str(), r)).collect();
+    let wanted: HashSet<String> = headers
+        .iter()
+        .filter(|(path, _, _)| modified_at_or_after(path, modified_since))
+        .filter_map(|(_, id, _)| root_in(&roles, id))
+        .collect();
+
+    // Pass 2: read every file of every wanted family in full.
+    let states: Vec<CodexFileState> = headers
+        .iter()
+        .filter(|(_, id, _)| root_in(&roles, id).is_some_and(|r| wanted.contains(&r)))
+        .map(|(path, _, _)| {
+            let mut st = CodexFileState::default();
+            let _ = read_codex_file(path, 0, &mut st);
+            st
+        })
+        .collect();
+    let refs: Vec<&CodexFileState> = states.iter().collect();
+    merge_codex(&refs, &titles)
+}
+
+fn read_header(path: &Path) -> Option<(String, CodexRole)> {
     let bytes = first_matching_line(path, r#""type":"session_meta""#).ok()??;
     let line = serde_json::from_slice::<Line>(&bytes).ok()?;
     let meta = serde_json::from_str::<SessionMeta>(line.payload?.get()).ok()?;
@@ -178,46 +288,7 @@ fn read_header(path: &Path) -> Option<(String, Role)> {
     Some((meta.id, role))
 }
 
-fn read_file(path: &Path) -> Option<RawSession> {
-    let mut raw = RawSession { tool: Some(Tool::Codex), ..Default::default() };
-    let mut role = None;
-    let mut prev = Totals::default();
-    let _ = for_each_matching_line(path, NEEDLES, |bytes| {
-        let Ok(line) = serde_json::from_slice::<Line>(bytes) else { return };
-        let at = line.timestamp.and_then(parse_ts);
-        let payload = line.payload.map(RawValue::get).unwrap_or("null");
-        match line.kind {
-            "session_meta" if role.is_none() => {
-                if let Ok(meta) = serde_json::from_str::<SessionMeta>(payload) {
-                    role = Some(apply_meta(&mut raw, meta));
-                }
-            }
-            "turn_context" => {
-                if let Ok(tc) = serde_json::from_str::<TurnContext>(payload) {
-                    raw.models.extend(tc.model);
-                }
-            }
-            "response_item" | "event_msg" => {
-                let Some(at) = at else { return };
-                raw.activity.push(at);
-                if line.kind == "event_msg" && payload.contains("\"token_count\"") {
-                    if let Ok(TokenCount { kind, info: Some(TokenInfo { total_token_usage: Some(t) }) }) =
-                        serde_json::from_str::<TokenCount>(payload)
-                    {
-                        if kind == "token_count" {
-                            raw.token_events.push(TokenEvent { at, usage: t.minus(prev) });
-                            prev = t;
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    });
-    role.map(|_| raw)
-}
-
-fn apply_meta(raw: &mut RawSession, meta: SessionMeta) -> Role {
+fn apply_meta(raw: &mut RawSession, meta: SessionMeta) -> CodexRole {
     let role = role_of(&meta);
     raw.native_session_id = meta.id;
     raw.cwd = meta.cwd;
@@ -228,16 +299,16 @@ fn apply_meta(raw: &mut RawSession, meta: SessionMeta) -> Role {
     role
 }
 
-fn role_of(meta: &SessionMeta) -> Role {
+fn role_of(meta: &SessionMeta) -> CodexRole {
     match meta.thread_source.as_deref() {
-        Some("guardian_review") => Role::Excluded,
+        Some("guardian_review") => CodexRole::Excluded,
         Some("subagent") => meta
             .source
             .as_ref()
             .and_then(|s| s.pointer("/subagent/thread_spawn/parent_thread_id"))
             .and_then(|v| v.as_str())
-            .map_or(Role::Excluded, |p| Role::Subagent { parent: p.to_owned() }),
-        _ => Role::Main,
+            .map_or(CodexRole::Excluded, |p| CodexRole::Subagent { parent: p.to_owned() }),
+        _ => CodexRole::Main,
     }
 }
 
@@ -382,5 +453,152 @@ mod tests {
         assert_eq!(r.git_branch.as_deref(), Some("feat/x"));
         assert_eq!(r.source_title.as_deref(), Some("Codex task"));
         assert_eq!(r.models.iter().cloned().collect::<Vec<_>>(), vec!["gpt-5.5-codex"]);
+    }
+
+    fn fixture_dir() -> &'static Path {
+        Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/codex/sessions/2026/11/20"))
+    }
+
+    fn temp_dir(test: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("aiwl-codex-inc-{test}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn append(path: &Path, bytes: &[u8]) {
+        use std::io::Write;
+        std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap().write_all(bytes).unwrap();
+    }
+
+    fn sorted(mut raws: Vec<RawSession>) -> Vec<RawSession> {
+        for r in &mut raws {
+            r.activity.sort();
+            r.token_events.sort_by_key(|e| e.at);
+        }
+        raws
+    }
+
+    fn read_whole(path: &Path) -> CodexFileState {
+        let mut st = CodexFileState::default();
+        read_codex_file(path, 0, &mut st).unwrap();
+        st
+    }
+
+    fn titles() -> HashMap<String, String> {
+        read_thread_titles(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/codex")))
+    }
+
+    #[test]
+    fn incremental_equals_full_read_at_every_split() {
+        let names = ["rollout-a.jsonl", "rollout-b.jsonl", "rollout-c.jsonl", "rollout-d.jsonl"];
+        let bytes: Vec<Vec<u8>> = names.iter().map(|n| std::fs::read(fixture_dir().join(n)).unwrap()).collect();
+        let dir = temp_dir("split");
+        let paths: Vec<PathBuf> = names.iter().map(|n| dir.join(n)).collect();
+        for (p, b) in paths.iter().zip(&bytes) {
+            std::fs::write(p, b).unwrap();
+        }
+        let full: Vec<CodexFileState> = paths.iter().map(|p| read_whole(p)).collect();
+        let refs: Vec<&CodexFileState> = full.iter().collect();
+        let expected = sorted(merge_codex(&refs, &titles()));
+        assert_eq!(expected.len(), 1);
+        assert_eq!(expected[0].native_session_id, "c1");
+        assert_eq!(total(&expected[0]), TokenUsage { input: 700, output: 90, cache_read: 900, cache_write: 0 });
+
+        for i in 0..names.len() {
+            for k in 0..=bytes[i].len() {
+                std::fs::write(&paths[i], &bytes[i][..k]).unwrap();
+                let mut st = CodexFileState::default();
+                let off = read_codex_file(&paths[i], 0, &mut st).unwrap();
+                append(&paths[i], &bytes[i][k..]);
+                read_codex_file(&paths[i], off, &mut st).unwrap();
+                let mut all: Vec<&CodexFileState> = full.iter().collect();
+                all[i] = &st;
+                assert_eq!(sorted(merge_codex(&all, &titles())), expected, "file {i} split at {k}");
+                assert_eq!(st.user_texts, full[i].user_texts, "file {i} split at {k}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cumulative_totals_are_not_double_counted_across_resumes() {
+        let bytes = std::fs::read(fixture_dir().join("rollout-a.jsonl")).unwrap();
+        let dir = temp_dir("cumulative");
+        let path = dir.join("a.jsonl");
+        // Split right after each token_count line.
+        let mut ends = Vec::new();
+        for (i, b) in bytes.iter().enumerate() {
+            if *b == b'\n' && bytes[..i].windows(11).any(|w| w == b"token_count") {
+                ends.push(i + 1);
+            }
+        }
+        assert!(!ends.is_empty());
+        for k in ends {
+            std::fs::write(&path, &bytes[..k]).unwrap();
+            let mut st = CodexFileState::default();
+            let off = read_codex_file(&path, 0, &mut st).unwrap();
+            assert_eq!(off, k as u64);
+            append(&path, &bytes[k..]);
+            read_codex_file(&path, off, &mut st).unwrap();
+            assert_eq!(total(&st.raw), TokenUsage { input: 600, output: 80, cache_read: 900, cache_write: 0 }, "split at {k}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn child_read_before_parent_still_merges() {
+        let child = read_whole(&fixture_dir().join("rollout-b.jsonl"));
+        assert!(merge_codex(&[&child], &titles()).is_empty());
+        let parent = read_whole(&fixture_dir().join("rollout-a.jsonl"));
+        let v = merge_codex(&[&child, &parent], &titles());
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].native_session_id, "c1");
+        assert_eq!(total(&v[0]), TokenUsage { input: 700, output: 90, cache_read: 900, cache_write: 0 });
+    }
+
+    #[test]
+    fn collects_user_texts_from_main_only() {
+        let dir = temp_dir("texts");
+        let meta = |id: &str, extra: &str| {
+            format!("{{\"timestamp\":\"2026-11-20T01:00:00.000Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\"{extra}}}}}\n")
+        };
+        let user = |t: &str| {
+            format!("{{\"timestamp\":\"2026-11-20T01:00:01.000Z\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"{t}\"}}}}\n")
+        };
+        let long = "あ".repeat(400);
+        let body: String = ["one", "two", &long, "four"].iter().map(|t| user(t)).collect();
+        let main = dir.join("m.jsonl");
+        let sub = dir.join("s.jsonl");
+        let guard = dir.join("g.jsonl");
+        std::fs::write(&main, meta("m", "") + &body).unwrap();
+        std::fs::write(&sub, meta("s", r#","thread_source":"subagent","source":{"subagent":{"thread_spawn":{"parent_thread_id":"m"}}}"#) + &body).unwrap();
+        std::fs::write(&guard, meta("g", r#","thread_source":"guardian_review""#) + &body).unwrap();
+
+        let m = read_whole(&main);
+        assert_eq!(m.user_texts.len(), 3);
+        assert_eq!(m.user_texts[0], "one");
+        assert_eq!(m.user_texts[1], "two");
+        assert_eq!(m.user_texts[2].chars().count(), 300);
+        assert!(read_whole(&sub).user_texts.is_empty());
+        assert!(read_whole(&guard).user_texts.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn first_session_meta_wins_across_resumes() {
+        let dir = temp_dir("meta");
+        let path = dir.join("m.jsonl");
+        let meta = |id: &str, cwd: &str| {
+            format!("{{\"timestamp\":\"2026-11-20T01:00:00.000Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"cwd\":\"{cwd}\"}}}}\n")
+        };
+        std::fs::write(&path, meta("m", "/first")).unwrap();
+        let mut st = CodexFileState::default();
+        let off = read_codex_file(&path, 0, &mut st).unwrap();
+        append(&path, meta("other", "/second").as_bytes());
+        read_codex_file(&path, off, &mut st).unwrap();
+        assert_eq!(st.thread_id.as_deref(), Some("m"));
+        assert_eq!(st.raw.cwd.as_deref(), Some("/first"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
