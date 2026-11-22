@@ -58,7 +58,7 @@ export function registerSessionRoutes(app: Hono<AppEnv>, now: () => number): voi
     const time = now();
     const [requests, projects] = await Promise.all([
       listRequests(c.env.DB, principal.userId, time),
-      listRunnerProjects(c.env.DB, principal.userId, time),
+      listRunnerProjects(c.env.DB, principal.userId),
     ]);
     return c.json({ ...board, requests, runnerProjects: projects.length ? projects : undefined }, 200, headers);
   });

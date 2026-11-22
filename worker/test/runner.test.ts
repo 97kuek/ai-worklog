@@ -23,6 +23,7 @@ async function setup() {
   const result = (attempt: string, state: string, token = mac, error?: string) =>
     call("/api/runner/result", token, "PUT", { attempt_id: attempt, state, error });
   async function queue() {
+    expect((await claim()).status).toBe(200);
     expect((await put(card)).status).toBe(200);
     expect((await put({ stage: "queued" })).status).toBe(200);
   }
@@ -120,17 +121,18 @@ it("requires a queued, configured card and a fresh exact capability advertised f
   expect((await s.start(attempt)).status).toBe(404);
   expect((await s.put(plain)).status).toBe(200);
   expect(await (await s.start(attempt)).json()).toEqual({ error: "not_queued" });
-  await s.put({ stage: "queued" });
-  expect(await (await s.start(attempt)).json()).toEqual({ error: "engine_required" });
-  await s.put({ ...card, stage: "queued", expected: { ...plain, engine: null, model: null, effort: null, stage: "queued" } });
+  expect(await (await s.put({ stage: "queued" })).json()).toEqual({ error: "engine_required" });
+  const edit = { ...card, stage: "queued", expected: { ...plain, engine: null, model: null, effort: null, stage: "backlog" } };
   const other = { ...env, OWNER_EMAIL: "other@example.com" };
   await s.call("/api/runner/claim", s.otherMac, "PUT", capabilities, ORIGIN, other);
-  expect(await (await s.start(attempt)).json()).toEqual({ error: "runner_unavailable" });
+  expect(await (await s.put(edit)).json()).toEqual({ error: "project_unregistered" });
   const otherUser = await s.userToken(other.OWNER_EMAIL);
   expect((await s.call(s.path + "/start", otherUser, "POST", { attempt_id: attempt }, ORIGIN, other)).status).toBe(404);
   await s.claim(s.mac, { ...capabilities, engines: ["claude_code"] });
-  expect(await (await s.start(attempt)).json()).toEqual({ error: "runner_unavailable" });
+  expect(await (await s.put(edit)).json()).toEqual({ error: "engine_unavailable" });
+  expect((await s.board()).requests[0]).toMatchObject({ ...plain, engine: null, stage: "backlog" });
   await s.claim();
+  expect((await s.put(edit)).status).toBe(200);
   s.tick(2 * 60_000);
   expect(await (await s.start(attempt)).json()).toEqual({ error: "runner_unavailable" });
   await s.claim();
@@ -157,7 +159,7 @@ it("binds an attempt to a single owner request across concurrent retries", async
   expect(await (await s.claim()).json()).toEqual({ job: null });
 });
 
-it("polls only the owner's requests and offers distinct online projects on the initial board", async () => {
+it("polls only the owner's requests and offers distinct registered projects on the initial board", async () => {
   const s = await setup();
   const poll = "/api/board/requests";
   await s.queue();
@@ -177,9 +179,9 @@ it("polls only the owner's requests and offers distinct online projects on the i
   expect(await (await s.call("/api/board", otherUser, "GET", undefined, ORIGIN, other)).json()).toEqual({ sessions: [], requests: [] });
   expect(await (await s.call("/api/board?status=running", s.user, "GET")).json()).toEqual({ sessions: [] });
   s.tick(2 * 60_000 - 1);
-  expect(await (await s.call("/api/board", s.user, "GET")).json()).toMatchObject({ runnerProjects: ["alpha", "gamma"] });
+  expect(await (await s.call("/api/board", s.user, "GET")).json()).toMatchObject({ runnerProjects: ["alpha", "beta", "gamma"] });
   s.tick(1);
-  expect(await (await s.call("/api/board", s.user, "GET")).json()).not.toHaveProperty("runnerProjects");
+  expect(await (await s.call("/api/board", s.user, "GET")).json()).toMatchObject({ runnerProjects: ["alpha", "beta", "gamma"] });
 });
 
 it("checks principals, origin and payloads before dispatch", async () => {
@@ -195,7 +197,94 @@ it("checks principals, origin and payloads before dispatch", async () => {
   expect((await s.call("/api/runner/result", s.user, "PUT", { ...attempt, state: "failed" })).status).toBe(403);
   expect((await s.call("/api/runner/result", s.mac, "PUT", { ...attempt, state: "pending" })).status).toBe(400);
   expect((await s.call("/api/runner/result", s.mac, "PUT", { ...attempt, state: "failed", error: "x".repeat(257) })).status).toBe(400);
-  for (const caps of [{}, { ...capabilities, projects: [""] }, { ...capabilities, engines: ["other"] }]) {
+  for (const caps of [{}, { ...capabilities, projects: [""] }, { ...capabilities, engines: ["other"] }, { ...capabilities, auto_queue: "yes" }]) {
     expect((await s.call("/api/runner/claim", s.mac, "PUT", caps)).status).toBe(400);
   }
+});
+
+it("processes the visible eligible FIFO after reconnect, including ties, edits and explicit retries", async () => {
+  const s = await setup();
+  const caps = { projects: ["demo", "other"], engines: ["codex"], auto_queue: true };
+  const claim = async (projects: string[]) => (await s.call("/api/runner/claim", s.mac, "PUT", { ...caps, projects }))
+    .json<{ job: { attempt_id: string; request_id: string; title: string } | null }>();
+  expect((await claim(caps.projects)).job).toBeNull();
+  s.tick(24 * 60 * 60_000);
+  // Reverse lexical order so a timestamp/ID sort cannot accidentally pass.
+  const [other, first, second] = ["3","2","1"].map(n => "00000000-0000-0000-0000-00000000000" + n) as [string, string, string];
+  const put = (id: string, body: object) => s.call("/api/board/requests/" + id, s.user, "PUT", body);
+  for (const id of [other, first, second]) {
+    const fields = { ...card, project: id === other ? "other" : "demo" };
+    expect((await put(id, fields)).status).toBe(200);
+    expect((await put(id, id === second
+      ? { ...fields, stage: "queued", expected: { ...fields, stage: "backlog" } }
+      : { stage: "queued" })).status).toBe(200);
+  }
+  s.tick(1);
+  const queued = { ...card, stage: "queued" };
+  expect((await put(first, { ...queued, title: "Edited first", expected: queued })).status).toBe(200);
+  expect((await s.board()).requests.map(r => r.id)).toEqual([other, first, second]);
+  expect((await (await s.claim()).json())).toEqual({ job: null });
+  const claims = await Promise.all([claim(["demo"]), claim(["demo"])]);
+  expect(claims.filter(c => c.job)).toHaveLength(1);
+  const job = claims.find(c => c.job)!.job!;
+  expect(job).toMatchObject({ request_id: first, title: "Edited first" });
+  expect((await s.result(job.attempt_id, "failed")).status).toBe(200);
+  const next = (await claim(["demo"])).job!;
+  expect(next.request_id).toBe(second);
+  expect((await s.result(next.attempt_id, "running")).status).toBe(200);
+  expect((await claim(caps.projects)).job).toBeNull();
+  expect((await s.result(next.attempt_id, "completed")).status).toBe(200);
+  expect((await claim(["demo"])).job).toBeNull();
+  const earliest = (await claim(caps.projects)).job!;
+  expect(earliest.request_id).toBe(other);
+  expect((await s.result(earliest.attempt_id, "failed")).status).toBe(200);
+  expect((await claim(caps.projects)).job).toBeNull();
+  expect((await put(first, { stage: "backlog" })).status).toBe(200);
+  expect((await put(first, { stage: "queued" })).status).toBe(200);
+  expect((await s.board()).requests.at(-1)).toMatchObject({ id: first });
+  expect((await s.board()).requests.at(-1)).not.toHaveProperty("launch");
+  const retried = (await claim(caps.projects)).job!;
+  expect(retried.request_id).toBe(first);
+  expect(retried.attempt_id).not.toBe(job.attempt_id);
+  s.tick(10 * 60_000);
+  expect((await claim(caps.projects)).job).toBeNull();
+});
+
+it("assigns a queued request atomically across eligible Macs and a concurrent legacy start", async () => {
+  const s = await setup();
+  await s.queue();
+  const caps = { ...capabilities, auto_queue: true };
+  const manual = crypto.randomUUID();
+  const [a,b] = await Promise.all([
+    s.call("/api/runner/claim", s.mac, "PUT", caps),
+    s.call("/api/runner/claim", s.otherMac, "PUT", caps),
+    s.start(manual),
+  ]);
+  const claimed = await Promise.all([a,b].map(r => r.json<{job: {request_id: string} | null}>()));
+  expect(claimed.filter(c => c.job)).toHaveLength(1);
+  expect(claimed.find(c => c.job)?.job?.request_id).toBe(s.id);
+  expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM board_launches WHERE request_id=?").bind(s.id).first("n")).toBe(1);
+});
+
+it("validates project keys and engines on a move or an in-queue edit, even when a runner changes configuration", async () => {
+  const s = await setup();
+  expect((await s.put(card)).status).toBe(200);
+  const move = () => s.put({ stage: "queued" });
+  expect(await (await move()).json()).toEqual({ error: "project_unregistered" });
+  await s.claim(s.mac, { projects: ["Demo"], engines: ["codex"] });
+  expect(await (await move()).json()).toEqual({ error: "project_unregistered" });
+  await s.claim(s.mac, { projects: ["demo"], engines: ["claude_code"] });
+  expect(await (await move()).json()).toEqual({ error: "engine_unavailable" });
+  await s.claim(s.otherMac, { projects: ["other"], engines: ["codex"] });
+  expect(await (await move()).json()).toEqual({ error: "engine_unavailable" });
+  await s.claim();
+  s.tick(24 * 60 * 60_000);
+  expect((await move()).status).toBe(200);
+  const queued = { ...card, stage: "queued" };
+  const update = { ...queued, title: "Edited", expected: queued };
+  expect(await (await s.put({ ...update, project: "Demo" })).json()).toEqual({ error: "project_unregistered" });
+  await s.claim(s.mac, { projects: ["replacement"], engines: ["codex"] });
+  expect(await (await s.put(update)).json()).toEqual({ error: "project_unregistered" });
+  expect((await s.board()).requests[0]).toMatchObject(queued);
+  expect((await s.put({ stage: "backlog" })).status).toBe(200);
 });
