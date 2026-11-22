@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -10,6 +11,7 @@ use super::ledger::Ledger;
 use super::state::{FileEntry, State};
 use crate::adapters::claude::{list_claude_files, merge_claude, read_claude_file, ClaudeFile, ClaudeFileState};
 use crate::adapters::codex::{list_codex_files, merge_codex, read_codex_file, read_thread_titles, CodexFileState, CodexRole};
+use crate::adapters::fsutil::create_private_dir;
 use crate::adapters::http::{SendError, Sender};
 use crate::adapters::jsonl::{stat, FileId};
 use crate::adapters::namer::{build_material, NameOutcome, Namer};
@@ -58,15 +60,15 @@ pub fn collect(opts: &CollectOptions, state: &mut State, ledger: &mut Ledger, se
         let rule = NamingRule { min_user_messages, max_per_run, now: opts.now, gap_ms };
         name_sessions(namer, &rule, ledger, &built, &mut report);
     }
-    forget_user_texts(state, ledger);
+    forget_user_texts(state, ledger, opts.naming.is_some());
     send_changed(opts, ledger, &built, sender, &mut report);
     report
 }
 
 /// ~/.ai-worklog/collect.lock を try_lock する。取れなければ None
 pub fn acquire_lock(home: &Path) -> io::Result<Option<File>> {
-    std::fs::create_dir_all(home)?;
-    let file = OpenOptions::new().create(true).truncate(false).write(true).open(home.join("collect.lock"))?;
+    create_private_dir(home)?;
+    let file = OpenOptions::new().create(true).truncate(false).write(true).mode(0o600).open(home.join("collect.lock"))?;
     match file.try_lock() {
         Ok(()) => Ok(Some(file)),
         Err(TryLockError::WouldBlock) => Ok(None),
@@ -319,12 +321,12 @@ fn name_sessions(namer: &dyn Namer, rule: &NamingRule, ledger: &mut Ledger, buil
     }
 }
 
-/// 名付けが済んだか、あきらめたセッションの材料を状態から消す
-fn forget_user_texts(state: &mut State, ledger: &Ledger) {
+/// 名付けが済んだか、あきらめたセッションの材料を状態から消す。名付けをしないなら全部消す
+fn forget_user_texts(state: &mut State, ledger: &Ledger, naming: bool) {
     let sessions = &ledger.sessions;
     let done = |key: &str| sessions.get(key).is_some_and(|s| s.title.is_some() || s.name_attempts >= MAX_NAME_ATTEMPTS);
     for e in state.files.values_mut() {
-        if !e.main_session_key().is_some_and(|k| done(&k)) {
+        if naming && !e.main_session_key().is_some_and(|k| done(&k)) {
             continue;
         }
         if let Some((_, _, st)) = &mut e.claude {
@@ -1195,5 +1197,21 @@ mod tests {
         assert!(acquire_lock(&home).unwrap().is_none());
         drop(first);
         assert!(acquire_lock(&home).unwrap().is_some());
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&home).unwrap().permissions().mode() & 0o777, 0o700);
+    }
+
+    #[test]
+    fn naming_disabled_keeps_no_user_texts() {
+        let env = Env::new("naming_disabled");
+        let mut st = State::default();
+        let mut led = Ledger::default();
+        collect(&env.plain(), &mut st, &mut led, &FakeSender::ok());
+        assert!(user_texts_of(&st, "s1").is_empty());
+        assert!(user_texts_of(&st, "s2").is_empty());
+        assert!(
+            st.files.values().filter_map(|e| e.codex.as_ref()).all(|c| c.user_texts.is_empty()),
+            "codex user_texts kept"
+        );
     }
 }

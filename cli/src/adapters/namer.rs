@@ -37,7 +37,7 @@ impl Namer for ClaudeCliNamer {
 impl ClaudeCliNamer {
     /// claude を動かして標準出力を返す。動かせない・異常終了・時間切れなら None
     fn run(&self, material: &str) -> Option<String> {
-        std::fs::create_dir_all(&self.cwd).ok()?;
+        super::fsutil::create_private_dir(&self.cwd).ok()?;
         let mut child = Command::new(&self.command)
             .args(isolated_args(&self.model))
             .current_dir(&self.cwd)
