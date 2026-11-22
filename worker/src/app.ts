@@ -15,14 +15,14 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   const now = () => deps.now?.() ?? Date.now();
 
   app.use("/api/*", async (c, next) => {
-    const owner = c.env.OWNER_EMAIL;
-    if (typeof owner !== "string" || owner.length === 0) {
+    const rawOwner = c.env.OWNER_EMAIL;
+    const ownerEmail = typeof rawOwner === "string" ? rawOwner.trim().toLowerCase() : "";
+    if (ownerEmail.length === 0) {
       throw new ConfigError("OWNER_EMAIL must be set");
     }
     const identity = await deps.authenticate(c.req.raw, c.env);
     if (!identity) return c.json({ error: "unauthorized" }, 401);
 
-    const ownerEmail = owner.toLowerCase();
     if (identity.kind === "user") {
       if (identity.email.toLowerCase() !== ownerEmail) return c.json({ error: "forbidden" }, 403);
       const userId = await ensureUser(c.env.DB, ownerEmail, now());

@@ -83,6 +83,29 @@ it("fails_closed_when_owner_email_is_missing", async () => {
   expect(await count("users")).toBe(0);
 });
 
+it("fails_closed_when_owner_email_is_whitespace_only", async () => {
+  const { app, userToken, machineToken } = await testApp();
+  const e = { ...env, OWNER_EMAIL: "  " };
+  for (const token of [await userToken(), await machineToken()]) {
+    const res = await app.request("/api/me", { headers: { [H]: token } }, e);
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "misconfigured" });
+  }
+  expect(await count("users")).toBe(0);
+  expect(await count("machines")).toBe(0);
+});
+
+it("trims_and_lowercases_owner_email_for_humans_and_machines", async () => {
+  const { app, userToken, machineToken } = await testApp();
+  const e = { ...env, OWNER_EMAIL: " Owner@Example.com\n" };
+  const human = await app.request("/api/me", { headers: { [H]: await userToken() } }, e);
+  expect(human.status).toBe(200);
+  const machine = await app.request("/api/me", { headers: { [H]: await machineToken() } }, e);
+  expect(machine.status).toBe(200);
+  const { results } = await env.DB.prepare("SELECT email FROM users").all<{ email: string }>();
+  expect(results).toEqual([{ email: "owner@example.com" }]);
+});
+
 it("logs_config_errors_with_the_setting_name_but_not_in_the_response", async () => {
   const spy = vi.spyOn(console, "error").mockImplementation(() => {});
   try {
