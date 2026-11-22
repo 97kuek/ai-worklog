@@ -68,7 +68,7 @@ impl HttpSender {
         }
     }
 
-    fn put<T: serde::de::DeserializeOwned>(&self, resource: &str, body: &str) -> Result<T, SendError> {
+    pub(crate) fn put<T: serde::de::DeserializeOwned>(&self, resource: &str, body: &str) -> Result<T, SendError> {
         let url = format!("{}/api/{resource}", self.url.trim_end_matches('/'));
         let mut resp = self.agent()
             .put(&url)
