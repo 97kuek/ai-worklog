@@ -1,7 +1,8 @@
+import { residentModels } from "./office-layout.js";
 import { el, engineName, modelSettings, titleOf, type Session } from "./shared.js";
 import type { OfficeScene } from "./office-scene.js";
 
-const desksPerRoom = 3;
+const desksPerRoom = residentModels.length;
 type OpenTask = (id: string) => void;
 
 function button(label: string, className: string, text: string) {

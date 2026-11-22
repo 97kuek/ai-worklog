@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 
+import { residentModels } from "./office-layout.js";
 import { OfficeEmployee } from "./office-employee.js";
 
 const home = new THREE.Vector3(8, 10.2, 13);
@@ -141,7 +142,7 @@ export class OfficeScene {
 
   async load(signal: AbortSignal) {
     const loader = new GLTFLoader();
-    const names = ["room", "station", "employee-0", "employee-1", "employee-2"];
+    const names = ["room", "station", ...residentModels];
     const [room, station, ...employees] = await Promise.all(names.map(async name => {
       const response = await fetch("/office/" + name + ".glb", {signal});
       if (!response.ok) throw new Error("Office asset unavailable.");
