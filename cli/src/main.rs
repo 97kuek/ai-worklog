@@ -9,7 +9,7 @@ use ai_worklog::adapters::namer::{ClaudeCliNamer, Namer};
 use ai_worklog::app::collect::{acquire_lock, collect, CollectOptions};
 use ai_worklog::app::payload::DEFAULT_CHUNK;
 use ai_worklog::app::setup::{self, append_log_line};
-use ai_worklog::app::state;
+use ai_worklog::app::{ledger, state};
 
 use ai_worklog::app::output::{to_json, to_table};
 use ai_worklog::app::scan::{scan, ScanOptions};
@@ -99,8 +99,10 @@ fn run_collect() -> ExitCode {
         }
     };
     let state_path = home.join("state.json");
+    let ledger_path = home.join("sent.json");
     let mut state = state::load(&state_path);
-    let first_run = state.files.is_empty() && state.sessions.is_empty();
+    let mut ledger = ledger::load(&ledger_path);
+    let first_run = state.files.is_empty() && ledger.sessions.is_empty();
     let sender = HttpSender {
         url: cfg.api_url.clone(),
         client_id: cfg.client_id.clone(),
@@ -123,9 +125,12 @@ fn run_collect() -> ExitCode {
         naming: cfg.naming.enabled.then_some((&namer as &dyn Namer, cfg.naming.min_user_messages, cfg.naming.max_per_run)),
         chunk: DEFAULT_CHUNK,
     };
-    let report = collect(&opts, &mut state, &sender);
+    let report = collect(&opts, &mut state, &mut ledger, &sender);
     if let Err(e) = state::save(&state_path, &state) {
         eprintln!("ai-worklog: cannot save state {}: {e}", state_path.display());
+    }
+    if let Err(e) = ledger::save(&ledger_path, &ledger) {
+        eprintln!("ai-worklog: cannot save ledger {}: {e}", ledger_path.display());
     }
 
     let log_path = home.join("logs").join("collect.log");
