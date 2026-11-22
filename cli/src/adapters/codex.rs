@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::value::RawValue;
 
 use super::claude::modified_at_or_after;
-use super::jsonl::for_each_matching_line;
+use super::jsonl::{first_matching_line, for_each_matching_line};
 use super::time::parse_ts;
 use crate::domain::{RawSession, TokenEvent, TokenUsage, Tool};
 
@@ -101,47 +101,79 @@ enum Role {
     Excluded,
 }
 
-struct FileSession {
-    raw: RawSession,
-    role: Role,
-}
-
-/// Reads every `*.jsonl` under `codex_dir/sessions` modified at or after
-/// `modified_since`. Guardian review threads are dropped, subagent threads
-/// are merged into their parent, and orphan subagents are dropped.
+/// Reads Codex sessions that have any activity file modified at or after
+/// `modified_since`. A parent and its subagent threads form one family that
+/// is read whole whenever any of its files is in the window, so the result
+/// for a session never depends on the window. Guardian review threads and
+/// subagents whose root session is missing are dropped.
 pub fn read_codex_sessions(codex_dir: &Path, modified_since: SystemTime) -> Vec<RawSession> {
     let titles = read_titles(&codex_dir.join("session_index.jsonl"));
     let mut files = Vec::new();
-    collect_jsonl(&codex_dir.join("sessions"), modified_since, &mut files);
+    collect_jsonl(&codex_dir.join("sessions"), &mut files);
 
-    let mut mains: Vec<RawSession> = Vec::new();
+    // Pass 1: read only each file's session_meta to learn the family tree.
+    let headers: Vec<(PathBuf, String, Role)> = files
+        .into_iter()
+        .filter_map(|path| {
+            let (id, role) = read_header(&path)?;
+            Some((path, id, role))
+        })
+        .collect();
+    let roles: HashMap<&str, &Role> = headers.iter().map(|(_, id, r)| (id.as_str(), r)).collect();
+    let root_of = |id: &str| -> Option<String> {
+        let mut cur = id;
+        for _ in 0..32 {
+            match roles.get(cur)? {
+                Role::Main => return Some(cur.to_owned()),
+                Role::Subagent { parent } => cur = parent,
+                Role::Excluded => return None,
+            }
+        }
+        None
+    };
+    let wanted: HashSet<String> = headers
+        .iter()
+        .filter(|(path, _, _)| modified_at_or_after(path, modified_since))
+        .filter_map(|(_, id, _)| root_of(id))
+        .collect();
+
+    // Pass 2: read every file of every wanted family in full.
+    let mut mains: HashMap<String, RawSession> = HashMap::new();
     let mut children: Vec<(String, RawSession)> = Vec::new();
-    for path in files {
-        let Some(fs) = read_file(&path) else { continue };
-        match fs.role {
-            Role::Main => mains.push(fs.raw),
-            Role::Subagent { parent } => children.push((parent, fs.raw)),
-            Role::Excluded => {}
+    for (path, id, _) in &headers {
+        let Some(root) = root_of(id).filter(|r| wanted.contains(r)) else { continue };
+        let Some(raw) = read_file(path) else { continue };
+        if root == *id {
+            mains.insert(root, raw);
+        } else {
+            children.push((root, raw));
         }
     }
-
-    let index: HashMap<String, usize> =
-        mains.iter().enumerate().map(|(i, r)| (r.native_session_id.clone(), i)).collect();
-    for (parent, child) in children {
-        if let Some(&i) = index.get(&parent) {
-            let p = &mut mains[i];
+    for (root, child) in children {
+        if let Some(p) = mains.get_mut(&root) {
             p.activity.extend(child.activity);
             p.token_events.extend(child.token_events);
             p.models.extend(child.models);
         }
     }
-    for m in &mut mains {
-        m.source_title = titles.get(&m.native_session_id).cloned();
-    }
     mains
+        .into_values()
+        .map(|mut m| {
+            m.source_title = titles.get(&m.native_session_id).cloned();
+            m
+        })
+        .collect()
 }
 
-fn read_file(path: &Path) -> Option<FileSession> {
+fn read_header(path: &Path) -> Option<(String, Role)> {
+    let bytes = first_matching_line(path, r#""type":"session_meta""#).ok()??;
+    let line = serde_json::from_slice::<Line>(&bytes).ok()?;
+    let meta = serde_json::from_str::<SessionMeta>(line.payload?.get()).ok()?;
+    let role = role_of(&meta);
+    Some((meta.id, role))
+}
+
+fn read_file(path: &Path) -> Option<RawSession> {
     let mut raw = RawSession { tool: Some(Tool::Codex), ..Default::default() };
     let mut role = None;
     let mut prev = Totals::default();
@@ -177,30 +209,29 @@ fn read_file(path: &Path) -> Option<FileSession> {
             _ => {}
         }
     });
-    Some(FileSession { raw, role: role? })
+    role.map(|_| raw)
 }
 
 fn apply_meta(raw: &mut RawSession, meta: SessionMeta) -> Role {
+    let role = role_of(&meta);
     raw.native_session_id = meta.id;
     raw.cwd = meta.cwd;
     raw.git_branch = meta.git.and_then(|g| g.branch).filter(|b| !b.is_empty());
     if meta.originator.as_deref() == Some("Claude Code") {
         raw.invoked_by = Some(Tool::ClaudeCode);
     }
+    role
+}
+
+fn role_of(meta: &SessionMeta) -> Role {
     match meta.thread_source.as_deref() {
         Some("guardian_review") => Role::Excluded,
-        Some("subagent") => {
-            let parent = meta
-                .source
-                .as_ref()
-                .and_then(|s| s.pointer("/subagent/thread_spawn/parent_thread_id"))
-                .and_then(|v| v.as_str())
-                .map(str::to_owned);
-            match parent {
-                Some(parent) => Role::Subagent { parent },
-                None => Role::Excluded,
-            }
-        }
+        Some("subagent") => meta
+            .source
+            .as_ref()
+            .and_then(|s| s.pointer("/subagent/thread_spawn/parent_thread_id"))
+            .and_then(|v| v.as_str())
+            .map_or(Role::Excluded, |p| Role::Subagent { parent: p.to_owned() }),
         _ => Role::Main,
     }
 }
@@ -220,13 +251,13 @@ fn read_titles(path: &Path) -> HashMap<String, String> {
     titles
 }
 
-fn collect_jsonl(dir: &Path, since: SystemTime, out: &mut Vec<PathBuf>) {
+fn collect_jsonl(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(rd) = fs::read_dir(dir) else { return };
     for entry in rd.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            collect_jsonl(&path, since, out);
-        } else if path.extension().is_some_and(|e| e == "jsonl") && modified_at_or_after(&path, since) {
+            collect_jsonl(&path, out);
+        } else if path.extension().is_some_and(|e| e == "jsonl") {
             out.push(path);
         }
     }
@@ -263,6 +294,63 @@ mod tests {
         let s = build_session(load()[0].clone(), 30 * 60_000).unwrap();
         assert_eq!(s.blocks.len(), 1);
         assert_eq!(s.blocks[0].message_count, 5);
+    }
+
+    /// Copies the Codex fixture into a fresh temp dir and makes the named
+    /// rollout files look like they were last written in 2000.
+    fn fixture_with_stale(name: &str, stale: &[&str]) -> std::path::PathBuf {
+        let src = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/codex"));
+        let dst = std::env::temp_dir().join(format!("aiwl-codex-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dst);
+        copy_tree(src, &dst);
+        let old = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(946_684_800);
+        for f in stale {
+            let p = dst.join("sessions/2026/11/20").join(f);
+            std::fs::File::options().write(true).open(&p).unwrap().set_modified(old).unwrap();
+        }
+        dst
+    }
+
+    fn copy_tree(src: &Path, dst: &Path) {
+        std::fs::create_dir_all(dst).unwrap();
+        for e in std::fs::read_dir(src).unwrap().flatten() {
+            let to = dst.join(e.file_name());
+            if e.path().is_dir() { copy_tree(&e.path(), &to) } else { std::fs::copy(e.path(), to).unwrap(); }
+        }
+    }
+
+    fn one_day_ago() -> SystemTime {
+        SystemTime::now() - std::time::Duration::from_secs(86_400)
+    }
+
+    fn total(r: &RawSession) -> TokenUsage {
+        let mut t = TokenUsage::default();
+        for e in &r.token_events { t += e.usage; }
+        t
+    }
+
+    #[test]
+    fn includes_stale_subagent_of_recent_parent() {
+        let dir = fixture_with_stale("stale-child", &["rollout-b.jsonl"]);
+        let v = read_codex_sessions(&dir, one_day_ago());
+        assert_eq!(v.len(), 1);
+        assert_eq!(total(&v[0]), TokenUsage { input: 700, output: 90, cache_read: 900, cache_write: 0 });
+    }
+
+    #[test]
+    fn includes_stale_parent_of_recent_subagent() {
+        let dir = fixture_with_stale("stale-parent", &["rollout-a.jsonl"]);
+        let v = read_codex_sessions(&dir, one_day_ago());
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].native_session_id, "c1");
+        assert_eq!(total(&v[0]), TokenUsage { input: 700, output: 90, cache_read: 900, cache_write: 0 });
+    }
+
+    #[test]
+    fn skips_families_entirely_outside_window() {
+        let all = ["rollout-a.jsonl", "rollout-b.jsonl", "rollout-c.jsonl", "rollout-d.jsonl"];
+        let dir = fixture_with_stale("all-stale", &all);
+        assert!(read_codex_sessions(&dir, one_day_ago()).is_empty());
     }
 
     #[test]
