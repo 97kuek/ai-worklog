@@ -1,7 +1,6 @@
 .view-heading,
 #stats-period,
 .stats-head,
-.stats-controls,
 .stats-total {
   display: flex;
   align-items: center;
@@ -59,24 +58,6 @@
   font-size: var(--type-title);
   font-weight: 700;
 }
-.stats-scale {
-  display: inline-flex;
-  padding: 3px;
-  margin-top: 12px;
-  border: 1px solid var(--line);
-  border-radius: var(--pill);
-}
-.stats-scale button {
-  min-height: 36px;
-  padding: 4px 14px;
-  border-radius: inherit;
-}
-.stats-scale button[aria-pressed="true"] {
-  background: var(--paper);
-  color: var(--accent);
-  font-weight: 650;
-}
-.stats-scale-note { margin: 8px 0 0; color: var(--muted); }
 .stats-plot {
   display: grid;
   grid-template-columns: max-content minmax(0, 1fr);
@@ -180,15 +161,59 @@
 .stats-ticks span:last-child {
   justify-self: end;
 }
-.stats-controls {
-  gap: 8px;
-}
-.stats-controls select {
-  min-height: 36px;
-}
 .stats-selection {
+  margin: 8px 0 0;
   color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
+.stats-detail {
+  margin-top: 24px;
+}
+.stats-detail + .stats-detail {
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+.stats-detail h3 {
+  margin: 0;
+  font-size: 1rem;
+  color: var(--heading);
+}
+.project-share {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px clamp(18px, 3vw, 40px);
+  margin: 16px 0;
+}
+.project-pie {
+  position: relative;
+  flex: none;
+  width: clamp(100px, 15vw, 168px);
+  aspect-ratio: 1;
+  overflow: hidden;
+  border-radius: 50%;
+}
+.project-pie span { position: absolute; inset: 0; }
+.share-legend {
+  flex: 1 1 16rem;
+  max-width: 32rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.share-legend li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto 3.25em;
+  gap: 8px;
+  align-items: baseline;
+  padding: 6px 0;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+.share-legend li + li { border-top: 1px solid var(--line-soft); }
+.share-legend .stats-swatch { align-self: center; }
+.share-legend strong, .share-percent { text-align: right; white-space: nowrap; }
+.share-percent { color: var(--muted); }
 .stats-table-scroll {
   margin-top: 16px;
 }
@@ -220,8 +245,7 @@
 }
 
 @media (max-width: 767px) {
-  .stats-scale button,
-  .stats-controls select,
+  #stats-hour-filter,
   #stats-period button {
     min-height: 44px;
   }
