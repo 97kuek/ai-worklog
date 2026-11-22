@@ -106,3 +106,5 @@ Each runner takes one eligible request at a time. A queued request waits while i
 | A request stays queued or fails | Check the folder switch, engine availability and last check-in on the same Mac. If the provider failed, try it interactively in that checkout with the same model. If the runner was interrupted, inspect any work it already performed before retrying. |
 
 For an upgrade, apply the migrations and deploy the new Worker first. Reinstall the CLI, rerun `taskfolio setup`, and review any updated hook entries. The repository's production release workflow is described in [Contributing](CONTRIBUTING.md#release-the-production-worker).
+
+To show your Claude Code accounts in **Usage** and **Skills**, follow the [account registration instructions](CLAUDE-USAGE.md).

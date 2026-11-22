@@ -49,3 +49,7 @@ cargo run --locked --manifest-path cli/Cargo.toml -- scan --since-days 7 --forma
 ## 関連文書
 
 [セットアップとトラブル対応](SETUP.ja.md) · [開発とリリース](CONTRIBUTING.ja.md) · [画面設計](DESIGN.ja.md) · [MIT ライセンス](LICENSE)
+
+## Usage
+
+**Usage** では、登録したアカウントごとにトークン数、セッションの推定費用、利用枠の残量とリセット時刻を確認できます。Claude Code は5時間枠と7日間枠に対応しています。Skills はアカウントで絞り込めます。Activity はモデルの利用量をエンジン単位で集計します。[Claude Code アカウントの登録手順](CLAUDE-USAGE.md)

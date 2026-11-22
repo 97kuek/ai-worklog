@@ -49,3 +49,7 @@ The optional runner executes board requests. Register a folder on the Mac, insta
 ## Project documentation
 
 [Setup and troubleshooting](SETUP.md) · [Contributing and release checks](CONTRIBUTING.md) · [Interface design](DESIGN.md) · [MIT license](LICENSE)
+
+## Usage
+
+Open **Usage** to compare tokens, estimated session costs, remaining allowances and reset times by account. Claude Code reports five-hour and seven-day limits when available. Skills can be filtered by account. Activity groups model usage by engine. [Register Claude Code accounts](CLAUDE-USAGE.md)

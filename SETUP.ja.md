@@ -106,3 +106,5 @@ taskfolio login --url 'https://tasks.example.com' --machine-name 'My Mac' --clie
 | 依頼が待機したまま、または失敗する | 同じ Mac のフォルダースイッチ、エンジン、最終接続時刻を確認します。プロバイダーが失敗したときは、そのフォルダーで同じモデルを対話的に試します。ランナーが中断されたときは、再実行前に、すでに実行された作業を Mac で確認してください。 |
 
 アップグレード時は、先に D1 マイグレーションを適用して新しい Worker を公開します。その後で CLI を再インストールし、`taskfolio setup` を実行してフックの変更点を確認します。リポジトリの本番公開手順は[開発ガイド](CONTRIBUTING.ja.md#本番-worker-のリリース)を参照してください。
+
+**Usage** と **Skills** に Claude Code アカウントを表示するには、[アカウントの登録手順](CLAUDE-USAGE.md)を参照してください。
