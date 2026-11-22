@@ -3,3 +3,6 @@ pub mod codex;
 pub mod jsonl;
 pub mod time;
 pub mod namer;
+pub mod config;
+pub mod keychain;
+pub mod http;
