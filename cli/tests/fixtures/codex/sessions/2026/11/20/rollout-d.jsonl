@@ -1,0 +1,2 @@
+{"timestamp":"2026-11-20T08:00:00.000Z","type":"session_meta","payload":{"id":"c4","cwd":"/tmp/proj","originator":"Codex Desktop","thread_source":"subagent","source":{"subagent":{"thread_spawn":{"parent_thread_id":"zz"}}}}}
+{"timestamp":"2026-11-20T08:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user"}}
