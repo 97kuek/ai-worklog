@@ -316,3 +316,33 @@ it("shows resumed work in the office after manual completion while keeping the b
   await upload([{ ...original, observed_status: { state: "waiting", at: new Date(NOW + 2000).toISOString() } }]);
   expect(await read()).toEqual([]);
 });
+
+it("polls both terminal engines through running, waiting and completion without returning hidden history", async () => {
+  const { request, upload, post, machine } = await setup();
+  const path = "/api/board/updates";
+  const stamp = (delta: number) => new Date(NOW + delta).toISOString();
+  const inputs = example.sessions.map(session => ({ ...session, observed_status: { state: "running", at: stamp(-2) } }));
+  async function poll() {
+    const response = await request(path);
+    expect(response.headers.get("Cache-Control")).toBe("private, no-store");
+    return response.json<{ sessions: Session[]; requests: unknown[] }>();
+  }
+  expect((await request(path, machine)).status).toBe(403);
+  await upload([...inputs, { ...inputs[0], native_session_id: "unknown", observed_status: { state: "unknown", at: stamp(-2) } }]);
+  const running = await poll();
+  expect(running.requests).toEqual([]);
+  expect(running.sessions.map(s => s.tool).sort()).toEqual(["claude_code", "codex"]);
+  expect(running.sessions.every(s => s.observed_status?.state === "running")).toBe(true);
+  await upload(inputs.map(s => ({ ...s, observed_status: { state: "waiting", at: stamp(-1) } })));
+  const waiting = await poll();
+  expect(waiting.sessions).toHaveLength(2);
+  for (const session of waiting.sessions) {
+    expect(session.observed_status?.state).toBe("waiting");
+    expect((await request("/api/sessions/" + session.id + "/complete", undefined, post)).status).toBe(200);
+  }
+  expect((await poll()).sessions.map(s => s.completed_at)).toEqual([stamp(0), stamp(0)]);
+  const old = waiting.sessions[0]!;
+  await env.DB.prepare("UPDATE sessions SET completed_at = ? WHERE id = ?").bind(NOW - 7 * 24 * 3600_000, old.id).run();
+  expect((await poll()).sessions.map(s => s.id)).not.toContain(old.id);
+  expect((await request("/api/sessions/" + old.id)).status).toBe(200);
+});

@@ -48,7 +48,7 @@ export function el<K extends keyof HTMLElementTagNameMap>(
   if (text !== undefined) node.textContent = text;
   return node;
 }
-export function titleOf(s: Session) {
+export function titleOf(s: Pick<Session, "title" | "started_at">) {
   if (s.title?.trim()) return s.title.trim();
   const started = new Date(s.started_at);
   return "Task started " + monthDay.format(started) + " at " + clock.format(started);
@@ -91,7 +91,7 @@ export function modelSettings(session: Session): ModelEffort[] {
 export function modelLabels(session: Session) {
   return modelSettings(session).map(({ model, effort }) => effort ? model + " (" + effort + ")" : model);
 }
-export function stateOf(s: Session) {
+export function stateOf(s: Pick<Session, "completed_at" | "observed_status">) {
   return s.completed_at ? "completed" : (s.observed_status?.state ?? "unobserved");
 }
 export const labels: Record<string, string> = {

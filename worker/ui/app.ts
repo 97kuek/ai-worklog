@@ -12,7 +12,7 @@ import {
 import { installDatePicker } from "./date-picker.js";
 import { renderLog, type LogFilters } from "./log.js";
 import { renderCalendar } from "./calendar.js";
-import { renderBoard } from "./board.js";
+import { renderBoard, type BoardUpdates } from "./board.js";
 import { showTitle, editTaskTitle } from "./title-editor.js";
 import { renderDetail } from "./detail.js";
 import { renderUsage } from "./usage.js";
@@ -67,12 +67,12 @@ async function pollBoard() {
   pollingBoard = refresh;
   try {
     await refresh(async () => {
-      const data = await api<{ requests: BoardRequest[] }>("/api/board/requests", { signal });
+      const data = await api<BoardUpdates>("/api/board/updates", { signal });
       if (refreshBoard === refresh && notice.dataset.boardOffline) {
         notice.textContent = "";
         delete notice.dataset.boardOffline;
       }
-      return data.requests;
+      return data;
     });
   } catch (e) {
     if (refreshBoard === refresh && !signal?.aborted) {

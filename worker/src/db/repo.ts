@@ -213,6 +213,17 @@ export async function listBoardSessions(db: D1Database, userId: string, status?:
   return sessions.results;
 }
 
+export type BoardSessionRow = Pick<SessionRow, "id" | "tool" | "title" | "manual_title" | "observed_state"
+  | "observed_at" | "completed_at" | "started_at" | "ended_at">;
+
+export async function listVisibleBoardSessions(db: D1Database, user: string, cutoff: number) {
+  const { results } = await db.prepare(`SELECT id, tool, title, manual_title, observed_state, observed_at,
+    completed_at, started_at, ended_at FROM sessions WHERE user_id = ?
+    AND (completed_at > ? OR (completed_at IS NULL AND observed_state IN ('running', 'waiting')))`)
+    .bind(user, cutoff).all<BoardSessionRow>();
+  return results;
+}
+
 export async function findSession(db: D1Database, userId: string, id: string) {
   const [session, blocks] = await db.batch([
     sessionById(db, userId, id),

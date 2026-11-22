@@ -1,9 +1,10 @@
+import { completedBoardWindow } from "../../ui/board-retention";
 import type { Hono } from "hono";
 import type { AppEnv } from "../app";
 import { listRequests, listRunnerProjects } from "../db/launches";
-import { completeSession, findSession, listBoardSessions, saveSessions, setManualTitle } from "../db/repo";
+import { completeSession, findSession, listBoardSessions, listVisibleBoardSessions, saveSessions, setManualTitle } from "../db/repo";
 import { LIMITS, parseIngestPayload } from "../domain/ingest";
-import { serializeBlock, serializeSession } from "./serialize";
+import { serializeBlock, serializeBoardSession, serializeSession } from "./serialize";
 
 function parseManualTitle(value: unknown): string | null | undefined {
   if (value === null) return null;
@@ -61,6 +62,17 @@ export function registerSessionRoutes(app: Hono<AppEnv>, now: () => number): voi
       listRunnerProjects(c.env.DB, principal.userId),
     ]);
     return c.json({ ...board, requests, runnerProjects: projects.length ? projects : undefined }, 200, headers);
+  });
+
+  app.get("/api/board/updates", async (c) => {
+    const principal = c.get("principal");
+    if (principal.kind !== "user") return c.json({ error: "forbidden" }, 403);
+    const time = now();
+    const [sessions, requests] = await Promise.all([
+      listVisibleBoardSessions(c.env.DB, principal.userId, time - completedBoardWindow),
+      listRequests(c.env.DB, principal.userId, time),
+    ]);
+    return c.json({ sessions: sessions.map(serializeBoardSession), requests }, 200, { "Cache-Control": "private, no-store" });
   });
 
   app.get("/api/sessions/:id", async (c) => {
