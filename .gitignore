@@ -1,0 +1,16 @@
+# Local-only design notes and plans (kept out of the public repository)
+docs/
+
+# Rust
+cli/target/
+
+# Node / Cloudflare Workers
+node_modules/
+.wrangler/
+.dev.vars
+.env
+.env.*
+
+# OS / editors
+.DS_Store
+*.log
