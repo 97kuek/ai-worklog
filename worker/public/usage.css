@@ -1,0 +1,9 @@
+.usage-accounts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr)); gap: 16px; }
+.usage-panel h2, .usage-panel h3 { margin: 0; font-size: var(--type-heading); }
+.usage-panel h3 { border-top: 1px solid var(--line); margin-top: 20px; padding-top: 16px; }
+.usage-limits { display: grid; gap: 16px; margin-top: 16px; }
+.usage-limits progress { display: block; width: 100%; height: 8px; accent-color: var(--accent); margin: 6px 0; }
+.usage-caption { color: var(--muted); margin: 4px 0 0; }
+.usage-metrics { margin: 12px 0; }
+.usage-metrics div { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 4px 0; }
+.usage-metrics dd { margin: 0; font-variant-numeric: tabular-nums; }
