@@ -77,17 +77,17 @@
   text-align: right;
   margin: -7px 0;
 }
-.stats-bars,
+.stats-line-area,
 .stats-ticks {
   display: grid;
   grid-template-columns: repeat(24, minmax(0, 1fr));
 }
-.stats-bars {
+.stats-line-area {
   position: relative;
   height: clamp(150px, 22vw, 225px);
   border-block: 1px solid var(--line);
 }
-.stats-bars::before {
+.stats-line-area::before {
   content: "";
   position: absolute;
   top: 50%;
@@ -113,20 +113,33 @@
 .stats-hour[aria-pressed="true"] {
   background: var(--selected-fill);
 }
-.stats-stack {
-  display: flex;
-  flex-direction: column-reverse;
-  width: 64%;
-  max-width: 4rem;
+.stats-lines {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
   pointer-events: none;
 }
-.series-0 { background: var(--accent); }
-.series-1 { background: var(--ink); }
-.series-2 { background: repeating-linear-gradient(135deg, var(--accent) 0 2px, var(--selected-fill) 2px 5px); }
-.series-3 { background: var(--line-strong); }
-.series-4 { background: repeating-linear-gradient(0deg, var(--line-strong) 0 2px, var(--line-soft) 2px 4px); }
+.stats-lines svg { overflow: visible; }
+.stats-lines polyline, .stats-swatch line {
+  fill: none;
+  stroke: var(--series-color);
+  stroke-width: 2;
+  stroke-dasharray: var(--series-dash, none);
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+.stats-lines circle { fill: var(--series-color); }
+.series-total { --series-color: var(--accent); }
+.series-0 { --series-color: var(--ink); }
+.series-1 { --series-color: var(--accent); --series-dash: 6 5; }
+.series-2 { --series-color: var(--ink); --series-dash: 2 4; }
+.series-3 { --series-color: var(--muted); --series-dash: 8 4 2 4; }
+.series-4 { --series-color: var(--muted); --series-dash: 10 5; }
 .weekly-plot { padding-bottom: 1.75rem; }
-.weekly-plot .stats-bars { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+.weekly-plot .stats-line-area { grid-template-columns: repeat(7, minmax(0, 1fr)); }
 .stats-day-label {
   position: absolute;
   top: 100%;
@@ -142,7 +155,7 @@
   margin: 16px 0 0;
 }
 .stats-legend li { display: flex; align-items: center; gap: 6px; overflow-wrap: anywhere; min-width: 0; }
-.stats-swatch { width: 12px; height: 12px; flex: none; }
+.stats-swatch { width: 24px; height: 8px; flex: none; }
 .stats-table.project-table { min-width: 0; margin-top: 16px; table-layout: fixed; }
 .project-table th:first-child { width: 54%; }
 .project-table th:nth-child(2), .project-table td:nth-child(2) { text-align: right; }
