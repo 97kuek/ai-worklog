@@ -1,0 +1,61 @@
+name: Deploy Taskfolio
+on:
+  workflow_dispatch:
+    inputs:
+      verify_only:
+        description: Verify the release and Cloudflare connection without publishing
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    concurrency:
+      group: taskfolio-production
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '26.13.1'
+      - run: npm ci
+      - run: npm run typecheck && npm test
+      - name: Prepare the production binding
+        env:
+          TASKFOLIO_DATABASE_ID: ${{ vars.TASKFOLIO_DATABASE_ID }}
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          const config = JSON.parse(fs.readFileSync('wrangler.jsonc', 'utf8'));
+          const id = process.env.TASKFOLIO_DATABASE_ID;
+          if (!/^[a-f0-9-]{36}$/i.test(id ?? '')) throw new Error('Configure TASKFOLIO_DATABASE_ID');
+          config.d1_databases[0].database_id = id;
+          fs.writeFileSync('wrangler.production.json', JSON.stringify(config));
+          JS
+          ./node_modules/.bin/wrangler deploy --config wrangler.production.json --dry-run
+      - name: Verify access or publish the selected main commit
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          VERIFY_ONLY: ${{ inputs.verify_only }}
+        run: |
+          if [[ "$VERIFY_ONLY" == true ]]; then
+            ./node_modules/.bin/wrangler versions list --config wrangler.production.json > /dev/null
+            echo "Verified \`$GITHUB_SHA\` without publishing." >> "$GITHUB_STEP_SUMMARY"
+          else
+            ./node_modules/.bin/wrangler deploy --config wrangler.production.json --keep-vars \
+              --tag "${GITHUB_SHA:0:12}" --message "GitHub main $GITHUB_SHA (Actions run $GITHUB_RUN_ID)"
+            echo "Published \`$GITHUB_SHA\` to Taskfolio." >> "$GITHUB_STEP_SUMMARY"
+          fi
