@@ -95,8 +95,11 @@ fn read_file(path: &Path, raw: &mut RawSession, seen: &mut HashSet<(String, Stri
                 };
                 raw.activity.push(at);
                 if is_main {
-                    if let Some(cwd) = line.cwd {
-                        raw.cwd = Some(cwd);
+                    // Claude Code records the shell's current directory, which
+                    // moves with `cd`. The first value is where the session
+                    // was started, which is what identifies the project.
+                    if raw.cwd.is_none() {
+                        raw.cwd = line.cwd;
                     }
                     if let Some(branch) = line.git_branch {
                         raw.git_branch = (!branch.is_empty() && branch != "HEAD").then_some(branch);
@@ -191,6 +194,7 @@ mod tests {
         let v = load();
         assert_eq!(v[0].source_title.as_deref(), Some("デモ作業"));
         assert_eq!(v[0].git_branch.as_deref(), Some("main"));
+        assert_eq!(v[0].cwd.as_deref(), Some("/tmp/demo")); // the first cwd, not a later `cd`
         assert_eq!(v[0].models.iter().cloned().collect::<Vec<_>>(), vec!["claude-haiku-5-5", "claude-opus-5-5"]);
         assert_eq!(v[1].git_branch, None);
         assert_eq!(v[1].tool, Some(Tool::ClaudeCode));
