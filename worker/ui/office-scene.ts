@@ -2,13 +2,13 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 
+import { OfficeEmployee } from "./office-employee.js";
+
 const home = new THREE.Vector3(8, 10.2, 13);
 const target = new THREE.Vector3(0, 1.52, 0);
 type Desk = {
   group: THREE.Group;
-  person?: THREE.Object3D;
-  head?: THREE.Object3D;
-  arms: THREE.Object3D[];
+  person: OfficeEmployee;
   id?: string;
 };
 
@@ -45,12 +45,13 @@ export class OfficeScene {
     new THREE.MeshBasicMaterial({color: 0x7453bc, side: THREE.DoubleSide, transparent: true, opacity: 0.9}),
   );
   private readonly events = new AbortController();
-  private characters: THREE.Group[] = [];
+  private room = 0;
+  private timer = 0;
+  private lastShadow = 0;
   private seats: (string | undefined)[] = [];
   private pressed?: {x: number; y: number; dragged: boolean};
   private onscreen = false;
   private disposed = false;
-  private dirty = true;
   private frame = 0;
   private lastFrame = 0;
 
@@ -141,7 +142,7 @@ export class OfficeScene {
 
   async load(signal: AbortSignal) {
     const loader = new GLTFLoader();
-    const names = ["room", "station", "employee-0", "employee-1", "employee-2", "employee-3"];
+    const names = ["room", "station", "employee-0", "employee-1", "employee-2"];
     const [room, station, ...employees] = await Promise.all(names.map(async name => {
       const response = await fetch("/office/" + name + ".glb", {signal});
       if (!response.ok) throw new Error("Office asset unavailable.");
@@ -160,7 +161,6 @@ export class OfficeScene {
       return scene;
     }));
     if (signal.aborted) return;
-    this.characters = employees;
     this.furniture.add(room);
     const baseY = new THREE.Box3().setFromObject(room).min.y;
     const ground = new THREE.Mesh(
@@ -174,42 +174,39 @@ export class OfficeScene {
     // The room GLB carries the desk transforms from the editable Blender layout.
     const anchors = room.children.filter(node => /^DeskAnchor_\d{2}$/.test(node.name))
       .sort((left, right) => left.name.localeCompare(right.name));
-    if (anchors.length !== 9) throw new Error("Incomplete office layout.");
-    for (const anchor of anchors) {
+    if (anchors.length !== employees.length) throw new Error("Incomplete office layout.");
+    for (const [slot, anchor] of anchors.entries()) {
+      const cafe = room.getObjectByName(anchor.name.replace("DeskAnchor", "CafeAnchor"));
+      if (!cafe) throw new Error("Missing cafe seat.");
       const group = new THREE.Group();
       group.position.copy(anchor.position);
       group.quaternion.copy(anchor.quaternion);
       group.add(station.clone(true));
-      this.furniture.add(group);
-      this.desks.push({group, arms: []});
+      const person = new OfficeEmployee(employees[slot], cafe.position, group.position, group.getObjectByName("Chair")!, slot);
+      this.furniture.add(group, person.root, person.cup);
+      this.desks.push({group, person});
     }
-    this.setSeats(this.seats);
+    this.setSeats(this.seats, this.room);
     this.renderer.shadowMap.needsUpdate = true;
     this.invalidate();
   }
 
-  setSeats(ids: (string | undefined)[]) {
+  setSeats(ids: (string | undefined)[], room: number) {
+    const changedRoom = this.room !== room;
     this.seats = ids;
+    this.room = room;
     for (const [i, desk] of this.desks.entries()) {
       const id = ids[i];
-      if (desk.id === id) continue;
-      if (desk.person) desk.group.remove(desk.person);
+      if (!changedRoom && id === desk.id) continue;
       desk.id = id;
-      desk.person = undefined;
-      desk.head = undefined;
-      desk.arms = [];
       desk.group.userData.taskId = id;
-      if (id) {
-        const employee = this.characters[i % this.characters.length].clone(true);
-        desk.person = employee;
-        desk.group.add(employee);
-        desk.head = employee.getObjectByName("Head");
-        desk.arms = ["Arm_L", "Arm_R"].flatMap(name => employee.getObjectByName(name) ?? []);
+      desk.person.root.userData.taskId = id;
+      if (changedRoom || this.reducedMotion.matches) {
+        desk.person.pose(0, i * 2.1, !!id, this.reducedMotion.matches, true);
+        this.renderer.shadowMap.needsUpdate = true;
       }
-      this.renderer.shadowMap.needsUpdate = true;
     }
     this.select();
-    this.invalidate();
   }
 
   private hit(event: PointerEvent) {
@@ -269,33 +266,37 @@ export class OfficeScene {
   }
 
   private invalidate = () => {
-    this.dirty = true;
+    window.clearTimeout(this.timer);
     if (!this.frame && !this.disposed && this.onscreen && !document.hidden) this.frame = requestAnimationFrame(this.render);
   };
 
   private render = (now: number) => {
     this.frame = 0;
     if (this.disposed || !this.onscreen || document.hidden) return;
-    const animate = !this.reducedMotion.matches && this.desks.some(desk => !!desk.id);
-    if (this.dirty || (animate && now - this.lastFrame >= 50)) {
-      if (animate) {
-        for (const [i, desk] of this.desks.entries()) {
-          const t = now / 1000 + i * 1.9;
-          if (desk.head) desk.head.rotation.z = 0.018 * Math.sin(t * 1.6);
-          desk.arms.forEach((arm, side) => { arm.rotation.x = 0.025 * Math.sin(t * 5.5 + side * 2); });
-        }
-      }
-      this.renderer.render(this.world, this.camera);
-      this.lastFrame = now;
-      this.dirty = false;
+    const reduced = this.reducedMotion.matches;
+    const delta = Math.min((now - this.lastFrame) / 1000, 0.25);
+    let moving = false;
+    for (const [i, desk] of this.desks.entries()) {
+      if (desk.person.pose(delta, now / 1000 + i * 2.1, !!desk.id, reduced)) moving = true;
     }
-    if (animate) this.frame = requestAnimationFrame(this.render);
+    if (moving && (reduced || now - this.lastShadow > 150)) {
+      this.renderer.shadowMap.needsUpdate = true;
+      this.lastShadow = now;
+    }
+    this.renderer.render(this.world, this.camera);
+    this.lastFrame = now;
+    if (this.desks.length && !reduced) {
+      // Hold each animation frame between draws, especially during a quiet cafe shift.
+      const remaining = (moving ? 42 : 84) - (performance.now() - now);
+      this.timer = window.setTimeout(this.invalidate, Math.max(0, remaining));
+    }
   };
 
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
     cancelAnimationFrame(this.frame);
+    window.clearTimeout(this.timer);
     this.events.abort();
     this.visibility.disconnect();
     this.resizeObserver.disconnect();

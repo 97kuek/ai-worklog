@@ -1,7 +1,7 @@
-import { el, engineName, stateOf, titleOf, type Session } from "./shared.js";
+import { el, engineName, modelSettings, stateOf, titleOf, type Session } from "./shared.js";
 import type { OfficeScene } from "./office-scene.js";
 
-const desksPerRoom = 9;
+const desksPerRoom = 3;
 type OpenTask = (id: string) => void;
 
 function button(label: string, className: string, text: string) {
@@ -12,23 +12,31 @@ function button(label: string, className: string, text: string) {
   return control;
 }
 
-// Keep a task at its desk across status polls, reclaiming seats when a room closes.
+// A running task stays with the same employee, even when another room goes on break.
 export function assignDesks(previous: Map<string, number>, sessions: Session[]) {
   const running = sessions.filter(session => stateOf(session) === "running");
-  const capacity = Math.ceil(running.length / desksPerRoom) * desksPerRoom;
   const seats = new Map<string, number>();
   const taken = new Set<number>();
   for (const { id } of running) {
     const seat = previous.get(id);
-    if (seat === undefined || seat >= capacity) continue;
+    if (seat === undefined) continue;
     seats.set(id, seat);
     taken.add(seat);
   }
+  // An employee already on break can start the next task while a colleague returns.
+  let capacity = desksPerRoom;
+  for (const seat of previous.values()) capacity = Math.max(capacity, seat + 1);
+  capacity = Math.ceil(capacity / desksPerRoom) * desksPerRoom;
+  const wasWorking = new Set(previous.values());
+  let rested = 0;
   let vacant = 0;
   for (const { id } of running) {
     if (seats.has(id)) continue;
+    while (rested < capacity && wasWorking.has(rested)) rested++;
     while (taken.has(vacant)) vacant++;
-    seats.set(id, vacant++);
+    const seat = rested < capacity ? rested++ : vacant++;
+    seats.set(id, seat);
+    taken.add(seat);
   }
   return seats;
 }
@@ -157,8 +165,7 @@ class OfficeView {
     this.open = open;
     this.seats = assignDesks(this.seats, sessions);
     this.tasks = new Map(sessions.filter(s => this.seats.has(s.id)).map(s => [s.id, s]));
-    this.pages = Math.max(1, Math.ceil(this.seats.size / desksPerRoom));
-    this.page = Math.min(this.page, this.pages - 1);
+    for (const seat of this.seats.values()) this.pages = Math.max(this.pages, Math.floor(seat / desksPerRoom) + 1);
     this.draw();
   }
 
@@ -172,22 +179,22 @@ class OfficeView {
   }
 
   private updateScene() {
-    this.scene?.setSeats(this.currentSeats());
+    this.scene?.setSeats(this.currentSeats(), this.page);
   }
 
   private draw() {
     const seats = this.currentSeats();
     const signature = JSON.stringify([this.page, seats.map(id => {
       const s = id && this.tasks.get(id);
-      return s ? [id, titleOf(s), s.tool, s.project] : null;
+      return s ? [id, titleOf(s), s.tool, s.models, s.model_efforts, s.active_minutes] : null;
     })]);
     const count = this.seats.size;
     if (this.count.textContent !== String(count)) {
       this.count.textContent = String(count);
       this.count.setAttribute("aria-label", count + (count === 1 ? " running task" : " running tasks"));
     }
-    this.summary.textContent = count ? "" : "No tasks running.";
-    this.summary.hidden = count > 0;
+    this.summary.textContent = count ? "No tasks running in this room." : "No tasks running.";
+    this.summary.hidden = seats.some(Boolean);
     this.paging.hidden = this.pages < 2;
     this.roomLabel.textContent = "Room " + (this.page + 1) + " of " + this.pages;
     this.previous.disabled = this.page === 0;
@@ -208,7 +215,15 @@ class OfficeView {
       const seat = el("span", "office-seat", String(deskNumber).padStart(2, "0"));
       seat.setAttribute("aria-label", "Desk " + deskNumber);
       const copy = el("span", "office-task-copy");
-      copy.append(el("span", "office-task-title", titleOf(task)), el("span", "office-task-meta", engineName(task.tool)));
+      copy.append(el("span", "office-task-title", titleOf(task)));
+      const settings = modelSettings(task);
+      for (const pair of settings.length ? settings : [{ model: "", effort: null }]) {
+        const meta = el("span", "office-task-meta", [engineName(task.tool), pair.model || "—", "Effort " + (pair.effort ?? "—")].join(" · "));
+        copy.append(meta);
+      }
+      const minutes = task.active_minutes;
+      const elapsed = minutes > 0 && minutes < 1 ? "<1" : String(Math.floor(minutes));
+      copy.append(el("span", "office-task-meta", elapsed + " min active"));
       action.append(seat, copy);
       action.onclick = () => this.open(id);
       action.onmouseenter = action.onfocus = () => this.scene?.select(id);
@@ -217,7 +232,7 @@ class OfficeView {
       this.list.append(row);
     }
     if (focusedId) this.list.querySelector<HTMLButtonElement>('[data-session-id="' + CSS.escape(focusedId) + '"]')?.focus({ preventScroll: true });
-    this.scene?.setSeats(seats);
+    this.scene?.setSeats(seats, this.page);
   }
 
   dispose() {
