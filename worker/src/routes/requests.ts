@@ -1,22 +1,24 @@
 import type { Hono } from "hono";
 import type { AppEnv } from "../app";
+import { expireUnstarted, isUuid, listRequests, requestLocked } from "../db/launches";
 
 const keys = ["engine", "model", "effort", "project"] as const;
 const isStage = (value: unknown) => value === "backlog" || value === "queued";
 
-export async function listRequests(db: D1Database, user: string) {
-  const rows = await db.prepare("SELECT id, title, stage, engine, model, effort, project FROM board_requests WHERE user_id=? ORDER BY updated_at, id")
-    .bind(user).all();
-  return rows.results;
-}
-
 export function registerRequestRoutes(app: Hono<AppEnv>, now: () => number) {
+  app.get("/api/board/requests", async c => {
+    const principal = c.get("principal");
+    if (principal.kind !== "user") return c.json({ error: "forbidden" }, 403);
+    const requests = await listRequests(c.env.DB, principal.userId, now());
+    return c.json({ requests }, 200, { "Cache-Control": "private, no-store" });
+  });
+
   app.put("/api/board/requests/:id", async c => {
     const principal = c.get("principal");
     if (principal.kind !== "user" || c.req.header("Origin") !== new URL(c.req.url).origin)
       return c.json({ error: "forbidden" }, 403);
     const id = c.req.param("id");
-    if (!/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(id))
+    if (!isUuid(id))
       return c.json({ error: "invalid_id" }, 400);
     const body = await c.req.json().catch(() => null);
     if (!body || typeof body !== "object") return c.json({ error: "invalid_payload" }, 400);
@@ -45,26 +47,30 @@ export function registerRequestRoutes(app: Hono<AppEnv>, now: () => number) {
         return c.json({ error: "invalid_payload" }, 400);
       const write = editing
         ? db.prepare(`UPDATE board_requests SET title=?,engine=?,model=?,effort=?,project=?,stage=?,updated_at=?
-            WHERE user_id=? AND id=? AND title=? AND stage=? AND engine IS ? AND model IS ? AND effort IS ? AND project IS ?`)
+            WHERE user_id=? AND id=? AND title=? AND stage=? AND engine IS ? AND model IS ? AND effort IS ? AND project IS ? AND NOT ${requestLocked}`)
           .bind(title,...values,body.stage,now(),user,id,expected.title,expected.stage,...keys.map(key => expected[key]))
         : db.prepare("INSERT INTO board_requests(user_id,id,title,stage,updated_at,engine,model,effort,project) VALUES(?,?,?,'backlog',?,?,?,?,?) ON CONFLICT(user_id,id) DO NOTHING")
           .bind(user,id,title,now(),...values);
-      const [, read] = await db.batch<Record<string, string | null>>([
+      const [, , read] = await db.batch<Record<string, string | number | null>>([
+        expireUnstarted(db, user, now()),
         write,
-        db.prepare("SELECT title,stage,engine,model,effort,project FROM board_requests WHERE user_id=? AND id=?").bind(user,id),
+        db.prepare(`SELECT title,stage,engine,model,effort,project,${requestLocked} AS locked FROM board_requests WHERE user_id=? AND id=?`).bind(user,id),
       ]);
       const stored = read.results[0];
       if (!stored) return c.json({ error: "not_found" }, 404);
+      if (editing && stored.locked) return c.json({ error: "launch_conflict" }, 409);
       if (stored.title !== title || keys.some((key, index) => stored[key] !== values[index]) || (editing && stored.stage !== body.stage))
         return c.json({ error: "request_conflict" }, 409);
     } else {
       const stage = body.stage;
       if (!isStage(stage) || "expected" in body) return c.json({ error: "invalid_payload" }, 400);
-      const [, read] = await db.batch([
-        db.prepare("UPDATE board_requests SET stage=?, updated_at=? WHERE user_id=? AND id=? AND stage<>?").bind(stage,now(),user,id,stage),
-        db.prepare("SELECT id FROM board_requests WHERE user_id=? AND id=?").bind(user,id),
+      const [, , read] = await db.batch<{ locked: number }>([
+        expireUnstarted(db, user, now()),
+        db.prepare(`UPDATE board_requests SET stage=?, updated_at=? WHERE user_id=? AND id=? AND stage<>? AND NOT ${requestLocked}`).bind(stage,now(),user,id,stage),
+        db.prepare(`SELECT ${requestLocked} AS locked FROM board_requests WHERE user_id=? AND id=?`).bind(user,id),
       ]);
       if (!read.results.length) return c.json({ error: "not_found" }, 404);
+      if (read.results[0]!.locked) return c.json({ error: "launch_conflict" }, 409);
     }
     return c.json({ id }, 200, { "Cache-Control": "private, no-store" });
   });

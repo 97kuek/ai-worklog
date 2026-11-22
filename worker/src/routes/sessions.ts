@@ -1,6 +1,6 @@
 import type { Hono } from "hono";
 import type { AppEnv } from "../app";
-import { listRequests } from "./requests";
+import { listRequests, listRunnerProjects } from "../db/launches";
 import { completeSession, findSession, listBoardSessions, saveSessions, setManualTitle } from "../db/repo";
 import { LIMITS, parseIngestPayload } from "../domain/ingest";
 import { serializeBlock, serializeSession } from "./serialize";
@@ -52,8 +52,15 @@ export function registerSessionRoutes(app: Hono<AppEnv>, now: () => number): voi
     const status = c.req.query("status");
     if (status !== undefined && status !== "running") return c.json({ error: "invalid_status" }, 400);
     const sessions = await listBoardSessions(c.env.DB, principal.userId, status);
-    const requests = status ? undefined : await listRequests(c.env.DB, principal.userId);
-    return c.json({ sessions: sessions.map(serializeSession), requests }, 200, { "Cache-Control": "private, no-store" });
+    const headers = { "Cache-Control": "private, no-store" };
+    const board = { sessions: sessions.map(serializeSession) };
+    if (status) return c.json(board, 200, headers);
+    const time = now();
+    const [requests, projects] = await Promise.all([
+      listRequests(c.env.DB, principal.userId, time),
+      listRunnerProjects(c.env.DB, principal.userId, time),
+    ]);
+    return c.json({ ...board, requests, runnerProjects: projects.length ? projects : undefined }, 200, headers);
   });
 
   app.get("/api/sessions/:id", async (c) => {
