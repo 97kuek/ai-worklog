@@ -26,10 +26,10 @@ Your Mac(s)                                   Your Cloudflare account
 ```
 
 - **One session = one task.** Sessions are split into work blocks wherever there is a gap of 30 minutes or more.
-- **Short, consistent task names**, generated with Haiku through your Claude Code installation by default. Edit the name in task details to override it. Later uploads preserve the override.
+- **Short, consistent task names**, collected from saved Codex thread names when available. Haiku generates a name through Claude Code for sessions without one. Edit the name in task details to override it. Later uploads preserve the override.
 - **Rate limits**: Claude Code via the official status line input; Codex from its session logs.
 - **Self-hosted.** You deploy it to your own Cloudflare account.
-- **Privacy.** The Taskfolio API receives metadata: timestamps, project and branch names, models, token counts, the generated task name, and the names, descriptions and supported tools of available skills. When naming is enabled, Claude Code sends short excerpts of the opening exchange to the configured model to generate a title. Set `naming.enabled` to `false` in the collector config to turn this off.
+- **Privacy.** The Taskfolio API receives metadata: timestamps, project and branch names, models, token counts, the saved or generated task name, and the names, descriptions and supported tools of available skills. When naming is enabled, Claude Code sends short excerpts of the opening exchange to the configured model to generate a title. Set `naming.enabled` to `false` in the collector config to turn this off.
 
 ## Components
 
