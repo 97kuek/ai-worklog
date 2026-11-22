@@ -33,11 +33,19 @@ export function editTaskTitle(
     field.required = true;
     field.maxLength = 200;
     field.value = session.title ?? "";
-    const actions = el("div", "title-actions");
-    const apply = el("button", "small-button", "Save");
-    const cancel = el("button", "", "Cancel");
-    cancel.type = "button";
-    actions.append(apply, cancel);
+    field.enterKeyHint = "done";
+    const line = el("div", "title-input-line");
+    const apply = el("button", "title-apply");
+    apply.type = "submit";
+    apply.setAttribute("aria-label", "Save task title");
+    apply.title = "Save task title";
+    const check = el("img");
+    check.src = "/icons/lucide/check.svg";
+    check.alt = "";
+    check.width = check.height = 18;
+    apply.append(check);
+    line.append(field, apply);
+    form.append(label, line);
     const error = el("p", "title-error");
     error.setAttribute("role", "alert");
     function finish(current: Session) {
@@ -58,12 +66,11 @@ export function editTaskTitle(
       }
     }
     if (session.manual_title) {
-      const reset = el("button", "", "Use generated title");
+      const reset = el("button", "restore-title", "Use generated title");
       reset.type = "button";
       reset.onclick = () => void commit(null);
-      actions.append(reset);
+      form.append(reset);
     }
-    cancel.onclick = () => finish(session);
     field.oninput = () => field.setCustomValidity("");
     form.onsubmit = (event) => {
       event.preventDefault();
@@ -71,17 +78,19 @@ export function editTaskTitle(
       if (!value) {
         field.setCustomValidity("Enter a task title.");
         field.reportValidity();
+      } else if (value === session.title) {
+        finish(session);
       } else {
         void commit(value);
       }
     };
     form.onkeydown = (event) => {
-      if (event.key === "Escape" && !field.disabled) {
+      if (event.key === "Escape" && !event.isComposing && !field.disabled) {
         event.preventDefault();
         finish(session);
       }
     };
-    form.append(label, field, actions, error);
+    form.append(error);
     root.replaceChildren(form);
     field.focus();
     field.select();

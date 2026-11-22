@@ -1,13 +1,19 @@
-.detail-byline,
 .detail-part-heading {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
   gap: 4px 12px;
 }
-.detail-byline {
-  margin-bottom: 12px;
+.detail-settings {
+  width: 100%;
+  margin-top: 10px;
+  border-collapse: collapse;
+  table-layout: fixed;
 }
+.detail-settings :is(th, td) { text-align: start; padding: 3px 8px 3px 0; overflow-wrap: anywhere; }
+.detail-settings th { color: var(--muted); font-weight: 500; }
+.detail-settings td { font-weight: 600; }
+.detail-settings th:nth-child(2) { width: 44%; }
 .detail-facts {
   display: grid;
   grid-template-columns: 1fr;
