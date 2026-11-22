@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use super::payload::{chunk, session_fingerprint, to_ingest_json, ChunkLimits, Outgoing};
+use super::ledger::Ledger;
 use super::state::{FileEntry, State};
 use crate::adapters::claude::{list_claude_files, merge_claude, read_claude_file, ClaudeFile, ClaudeFileState};
 use crate::adapters::codex::{list_codex_files, merge_codex, read_codex_file, read_thread_titles, CodexFileState, CodexRole};
@@ -43,20 +44,22 @@ pub struct CollectReport {
 
 /// ログを前回の続きから読み、セッションを組み立て直し、名前を付け、
 /// 送った内容から変わったセッションだけを小分けにして送る。
-/// state は呼び出し側が load して渡し、終わったら save する
-pub fn collect(opts: &CollectOptions, state: &mut State, sender: &dyn Sender) -> CollectReport {
+/// state（ファイルごとの途中結果）と ledger（名前と送った記録）は呼び出し側が load して渡し、
+/// 終わったら save する
+pub fn collect(opts: &CollectOptions, state: &mut State, ledger: &mut Ledger, sender: &dyn Sender) -> CollectReport {
     let mut report = CollectReport::default();
     report.errors.extend(state.load_error.take());
+    report.errors.extend(ledger.load_error.take());
     let gap_ms = opts.gap_minutes.saturating_mul(60_000);
 
     read_new_lines(opts, state, &mut report);
     let built = build_sessions(opts, state, gap_ms);
     if let Some((namer, min_user_messages, max_per_run)) = opts.naming {
         let rule = NamingRule { min_user_messages, max_per_run, now: opts.now, gap_ms };
-        name_sessions(namer, &rule, state, &built, &mut report);
+        name_sessions(namer, &rule, ledger, &built, &mut report);
     }
-    forget_user_texts(state);
-    send_changed(opts, state, &built, sender, &mut report);
+    forget_user_texts(state, ledger);
+    send_changed(opts, ledger, &built, sender, &mut report);
     report
 }
 
@@ -284,13 +287,13 @@ struct NamingRule {
 
 /// 名前がなく、試した回数が上限未満で、材料が十分あるか止まっているセッションを、
 /// 1回に max_per_run 件まで名付ける
-fn name_sessions(namer: &dyn Namer, rule: &NamingRule, state: &mut State, built: &[Built], report: &mut CollectReport) {
+fn name_sessions(namer: &dyn Namer, rule: &NamingRule, ledger: &mut Ledger, built: &[Built], report: &mut CollectReport) {
     let mut tried = 0;
     for b in built {
         if tried >= rule.max_per_run {
             break;
         }
-        let entry = state.sessions.entry(b.key.clone()).or_default();
+        let entry = ledger.sessions.entry(b.key.clone()).or_default();
         if entry.title.is_some() || entry.name_attempts >= MAX_NAME_ATTEMPTS {
             continue;
         }
@@ -317,8 +320,8 @@ fn name_sessions(namer: &dyn Namer, rule: &NamingRule, state: &mut State, built:
 }
 
 /// 名付けが済んだか、あきらめたセッションの材料を状態から消す
-fn forget_user_texts(state: &mut State) {
-    let sessions = &state.sessions;
+fn forget_user_texts(state: &mut State, ledger: &Ledger) {
+    let sessions = &ledger.sessions;
     let done = |key: &str| sessions.get(key).is_some_and(|s| s.title.is_some() || s.name_attempts >= MAX_NAME_ATTEMPTS);
     for e in state.files.values_mut() {
         if !e.main_session_key().is_some_and(|k| done(&k)) {
@@ -334,10 +337,10 @@ fn forget_user_texts(state: &mut State) {
 }
 
 /// 送った内容から変わったセッションを小分けにして送る。成功した小分けだけ送った印を付ける
-fn send_changed(opts: &CollectOptions, state: &mut State, built: &[Built], sender: &dyn Sender, report: &mut CollectReport) {
+fn send_changed(opts: &CollectOptions, ledger: &mut Ledger, built: &[Built], sender: &dyn Sender, report: &mut CollectReport) {
     let mut targets: Vec<Target> = Vec::new();
     for b in built {
-        let entry = state.sessions.get(&b.key);
+        let entry = ledger.sessions.get(&b.key);
         let title = entry.and_then(|e| e.title.clone());
         let fp = session_fingerprint(&Outgoing { session: &b.session, title: title.as_deref() });
         if entry.and_then(|e| e.sent_fingerprint) == Some(fp) {
@@ -361,7 +364,7 @@ fn send_changed(opts: &CollectOptions, state: &mut State, built: &[Built], sende
     };
     let mut mark_sent = |part: &[Target], report: &mut CollectReport| {
         for (b, _, fp) in part {
-            let entry = state.sessions.entry(b.key.clone()).or_default();
+            let entry = ledger.sessions.entry(b.key.clone()).or_default();
             entry.sent_fingerprint = Some(*fp);
             (entry.sent_messages, entry.sent_tokens) = totals(&b.session);
         }
@@ -458,6 +461,7 @@ mod tests {
     use crate::adapters::time::parse_ts;
     use crate::app::payload::{to_ingest_json, Outgoing, DEFAULT_CHUNK};
     use crate::app::scan::{scan, ScanOptions};
+    use crate::app::ledger;
     use crate::app::state;
 
     const MACHINE: &str = "test-mac";
@@ -626,7 +630,8 @@ mod tests {
         let env = Env::new("first_run");
         let sender = FakeSender::ok();
         let mut st = State::default();
-        let report = collect(&env.plain(), &mut st, &sender);
+        let mut led = Ledger::default();
+        let report = collect(&env.plain(), &mut st, &mut led, &sender);
 
         let scanned = scan(&ScanOptions {
             claude_projects_dir: env.claude(),
@@ -657,11 +662,12 @@ mod tests {
         let env = Env::new("second_run");
         let sender = FakeSender::ok();
         let mut st = State::default();
-        collect(&env.plain(), &mut st, &sender);
+        let mut led = Ledger::default();
+        collect(&env.plain(), &mut st, &mut led, &sender);
         let calls = sender.calls();
         assert!(calls > 0);
 
-        let report = collect(&env.plain(), &mut st, &sender);
+        let report = collect(&env.plain(), &mut st, &mut led, &sender);
         assert_eq!(report.bytes_read, 0);
         assert_eq!(report.files_read, 0);
         assert_eq!(sender.calls(), calls);
@@ -674,13 +680,18 @@ mod tests {
         let path = env.root.join("home/state.json");
         let sender = FakeSender::ok();
         let mut st = State::default();
-        collect(&env.plain(), &mut st, &sender);
+        let mut led = Ledger::default();
+        collect(&env.plain(), &mut st, &mut led, &sender);
         state::save(&path, &st).unwrap();
+        ledger::save(&path.with_file_name("sent.json"), &led).unwrap();
         let calls = sender.calls();
 
         let mut back = state::load(&path);
+        let mut led_back = ledger::load(&path.with_file_name("sent.json"));
         assert_eq!(back.load_error, None);
-        let report = collect(&env.plain(), &mut back, &sender);
+        assert_eq!(led_back.load_error, None);
+        assert_eq!(led_back.sessions, led.sessions);
+        let report = collect(&env.plain(), &mut back, &mut led_back, &sender);
         assert_eq!(report.bytes_read, 0);
         assert_eq!(sender.calls(), calls);
         assert_eq!(report, CollectReport::default());
@@ -694,10 +705,43 @@ mod tests {
         std::fs::write(&path, "garbage").unwrap();
         let sender = FakeSender::ok();
         let mut st = state::load(&path);
-        let report = collect(&env.plain(), &mut st, &sender);
+        let mut led = Ledger::default();
+        let report = collect(&env.plain(), &mut st, &mut led, &sender);
         assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
         assert_eq!(sender.ids(0), ["s1", "c1", "s2"]);
         assert_eq!(st.load_error, None);
+    }
+
+    #[test]
+    fn lost_file_state_keeps_the_ledger_guard_and_titles() {
+        let env = Env::new("lost_file_state");
+        let home = env.root.join("home");
+        let namer = FakeNamer::new(Some("デモの改修"));
+        let opts = env.opts(ts("2026-11-22T00:00:00.000Z"), Some((&namer, 1, 10)), ChunkLimits { ..DEFAULT_CHUNK });
+        let sender = FakeSender::ok();
+        let mut st = State::default();
+        let mut led = Ledger::default();
+        collect(&opts, &mut st, &mut led, &sender);
+        state::save(&home.join("state.json"), &st).unwrap();
+        ledger::save(&home.join("sent.json"), &led).unwrap();
+        let calls = sender.calls();
+        assert_eq!(namer.calls.get(), 3);
+
+        // 途中結果のファイルだけが壊れ、サブエージェントのログも消えた
+        std::fs::write(home.join("state.json"), "garbage").unwrap();
+        std::fs::remove_file(env.claude().join("-tmp-demo/s1/subagents/agent-a1.jsonl")).unwrap();
+        let mut st = state::load(&home.join("state.json"));
+        let mut led = ledger::load(&home.join("sent.json"));
+        assert!(st.load_error.is_some());
+        assert_eq!(led.load_error, None);
+        let report = collect(&opts, &mut st, &mut led, &sender);
+        // 全部読み直すが、小さくなった s1 も、変わらない c1 / s2 も送らない
+        assert_eq!(sender.calls(), calls, "{:?}", sender.ids(calls));
+        assert_eq!(namer.calls.get(), 3);
+        assert!(report.errors.iter().any(|e| e == "skipped shrinking session claude_code:s1"), "{:?}", report.errors);
+        for key in ["claude_code:s1", "codex:c1", "claude_code:s2"] {
+            assert_eq!(led.sessions[key].title.as_deref(), Some("デモの改修"), "{key}");
+        }
     }
 
     #[test]
@@ -705,11 +749,12 @@ mod tests {
         let env = Env::new("appended");
         let sender = FakeSender::ok();
         let mut st = State::default();
-        collect(&env.plain(), &mut st, &sender);
+        let mut led = Ledger::default();
+        collect(&env.plain(), &mut st, &mut led, &sender);
         let calls = sender.calls();
 
         append_user_line(&env.s1(), "2026-11-20T03:05:00.000Z", "more");
-        let report = collect(&env.plain(), &mut st, &sender);
+        let report = collect(&env.plain(), &mut st, &mut led, &sender);
         assert_eq!(sender.ids(calls), ["s1"]);
         assert_eq!(report.files_read, 1);
         assert!(report.bytes_read > 0);
@@ -725,23 +770,24 @@ mod tests {
         let opts = env.opts(ts("2026-11-22T00:00:00.000Z"), None, limits());
         let sender = FakeSender::with(vec![Err(SendError::Server(500))]);
         let mut st = State::default();
+        let mut led = Ledger::default();
 
-        let first = collect(&opts, &mut st, &sender);
+        let first = collect(&opts, &mut st, &mut led, &sender);
         assert_eq!(sender.calls(), 2); // [s1, c1] は失敗、[s2] は成功
         assert_eq!(first.chunks_failed, 1);
         assert_eq!((first.sessions_changed, first.sessions_sent), (3, 1));
         assert_eq!(first.errors.len(), 1);
         assert!(!first.auth_failed);
-        assert_eq!(st.sessions.get("claude_code:s1").and_then(|s| s.sent_fingerprint), None);
-        assert!(st.sessions["claude_code:s2"].sent_fingerprint.is_some());
+        assert_eq!(led.sessions.get("claude_code:s1").and_then(|s| s.sent_fingerprint), None);
+        assert!(led.sessions["claude_code:s2"].sent_fingerprint.is_some());
 
-        let second = collect(&opts, &mut st, &sender);
+        let second = collect(&opts, &mut st, &mut led, &sender);
         assert_eq!(sender.ids(2), ["s1", "c1"]);
         assert_eq!(second.chunks_failed, 0);
         assert_eq!(second.bytes_read, 0);
         assert_eq!((second.sessions_changed, second.sessions_sent), (2, 2));
 
-        let third = collect(&opts, &mut st, &sender);
+        let third = collect(&opts, &mut st, &mut led, &sender);
         assert_eq!(sender.calls(), 3);
         assert_eq!(third, CollectReport::default());
     }
@@ -751,8 +797,9 @@ mod tests {
         let env = Env::new("rejected_chunk");
         let sender = FakeSender::rejecting("c1");
         let mut st = State::default();
+        let mut led = Ledger::default();
         // s1, c1, s2 が1つの小分けに入る
-        let report = collect(&env.plain(), &mut st, &sender);
+        let report = collect(&env.plain(), &mut st, &mut led, &sender);
         assert_eq!(sender.calls(), 4); // 3件まとめて拒否 → 1件ずつ3回
         assert_eq!(sender.ids(1), ["s1", "c1", "s2"]);
         assert_eq!((report.sessions_changed, report.sessions_sent, report.chunks_failed), (3, 2, 1));
@@ -760,13 +807,13 @@ mod tests {
         assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
         assert!(report.errors[0].starts_with("rejected session codex:c1: 400"), "{:?}", report.errors);
         assert!(!report.errors[0].contains("secret user text"), "{:?}", report.errors);
-        assert!(st.sessions["claude_code:s1"].sent_fingerprint.is_some());
-        assert!(st.sessions["claude_code:s2"].sent_fingerprint.is_some());
-        assert_eq!(st.sessions.get("codex:c1").and_then(|s| s.sent_fingerprint), None);
+        assert!(led.sessions["claude_code:s1"].sent_fingerprint.is_some());
+        assert!(led.sessions["claude_code:s2"].sent_fingerprint.is_some());
+        assert_eq!(led.sessions.get("codex:c1").and_then(|s| s.sent_fingerprint), None);
 
         // 次の回は c1 だけを送ろうとして、また拒否される
         let calls = sender.calls();
-        let again = collect(&env.plain(), &mut st, &sender);
+        let again = collect(&env.plain(), &mut st, &mut led, &sender);
         assert_eq!(sender.ids(calls), ["c1"]);
         assert_eq!((again.sessions_changed, again.sessions_sent), (1, 0));
         assert!(again.errors[0].starts_with("rejected session codex:c1: 400"), "{:?}", again.errors);
@@ -780,7 +827,8 @@ mod tests {
             Err(SendError::Auth(401)),
         ]);
         let mut st = State::default();
-        let report = collect(&env.plain(), &mut st, &sender);
+        let mut led = Ledger::default();
+        let report = collect(&env.plain(), &mut st, &mut led, &sender);
         assert_eq!(sender.calls(), 2);
         assert!(report.auth_failed);
         assert_eq!(report.sessions_sent, 0);
@@ -792,16 +840,17 @@ mod tests {
         let opts = env.opts(ts("2026-11-22T00:00:00.000Z"), None, ChunkLimits { max_sessions: 1, max_blocks: 100 });
         let sender = FakeSender::with(vec![Err(SendError::Auth(302))]);
         let mut st = State::default();
-        let report = collect(&opts, &mut st, &sender);
+        let mut led = Ledger::default();
+        let report = collect(&opts, &mut st, &mut led, &sender);
         assert!(report.auth_failed);
         assert_eq!(sender.calls(), 1);
         assert_eq!(report.sessions_sent, 0);
         assert_eq!(report.errors.len(), 1);
         assert!(report.errors[0].contains("302"), "{:?}", report.errors);
-        assert!(st.sessions.values().all(|s| s.sent_fingerprint.is_none()));
+        assert!(led.sessions.values().all(|s| s.sent_fingerprint.is_none()));
 
         // 次の回は3つとも送る
-        let again = collect(&opts, &mut st, &sender);
+        let again = collect(&opts, &mut st, &mut led, &sender);
         assert_eq!(sender.ids(1), ["s1", "c1", "s2"]);
         assert_eq!(again.sessions_sent, 3);
     }
@@ -816,8 +865,9 @@ mod tests {
         let opts = env.opts(now, Some((&namer, 3, 5)), ChunkLimits { ..DEFAULT_CHUNK });
         let sender = FakeSender::ok();
         let mut st = State::default();
+        let mut led = Ledger::default();
 
-        let report = collect(&opts, &mut st, &sender);
+        let report = collect(&opts, &mut st, &mut led, &sender);
         assert_eq!(namer.calls.get(), 1);
         assert_eq!(report.names_assigned, 1);
         let material = namer.materials.borrow()[0].clone();
@@ -827,7 +877,7 @@ mod tests {
         let sent = sender.sessions(0);
         assert_eq!(session(&sent, "s1")["title"], "デモの改修");
         assert_eq!(session(&sent, "s2")["title"], Value::Null);
-        assert_eq!(st.sessions["claude_code:s1"].title.as_deref(), Some("デモの改修"));
+        assert_eq!(led.sessions["claude_code:s1"].title.as_deref(), Some("デモの改修"));
         assert!(user_texts_of(&st, "s1").is_empty());
         assert_eq!(user_texts_of(&st, "s2"), ["x"]);
         for body in sender.bodies.borrow().iter() {
@@ -837,7 +887,7 @@ mod tests {
         // 次の回は Namer を呼ばない。名前付けの後に足された発言も状態に残さない
         append_user_line(&env.s1(), "2026-11-20T03:12:00.000Z", "fourth");
         let calls = sender.calls();
-        collect(&opts, &mut st, &sender);
+        collect(&opts, &mut st, &mut led, &sender);
         assert_eq!(namer.calls.get(), 1);
         assert!(user_texts_of(&st, "s1").is_empty());
         assert_eq!(session(&sender.sessions(calls), "s1")["title"], "デモの改修");
@@ -850,16 +900,17 @@ mod tests {
         let namer = FakeNamer::new(Some("別の作業"));
         let busy = env.opts(ts("2026-11-21T00:10:00.000Z"), Some((&namer, 3, 10)), ChunkLimits { ..DEFAULT_CHUNK });
         let mut st = State::default();
-        collect(&busy, &mut st, &FakeSender::ok());
-        assert_eq!(st.sessions["claude_code:s2"].title, None);
-        assert_eq!(st.sessions["claude_code:s2"].name_attempts, 0);
+        let mut led = Ledger::default();
+        collect(&busy, &mut st, &mut led, &FakeSender::ok());
+        assert_eq!(led.sessions["claude_code:s2"].title, None);
+        assert_eq!(led.sessions["claude_code:s2"].name_attempts, 0);
         assert_eq!(user_texts_of(&st, "s2"), ["x"]);
 
         // gap_minutes を過ぎたら名付ける
         let idle = env.opts(ts("2026-11-21T00:31:00.000Z"), Some((&namer, 3, 10)), ChunkLimits { ..DEFAULT_CHUNK });
         let sender = FakeSender::ok();
-        collect(&idle, &mut st, &sender);
-        assert_eq!(st.sessions["claude_code:s2"].title.as_deref(), Some("別の作業"));
+        collect(&idle, &mut st, &mut led, &sender);
+        assert_eq!(led.sessions["claude_code:s2"].title.as_deref(), Some("別の作業"));
         assert_eq!(session(&sender.sessions(0), "s2")["title"], "別の作業");
         assert!(user_texts_of(&st, "s2").is_empty());
     }
@@ -872,8 +923,9 @@ mod tests {
         let opts = env.opts(ts("2026-11-22T00:00:00.000Z"), Some((&namer, 1, 1)), ChunkLimits { ..DEFAULT_CHUNK });
         let sender = FakeSender::ok();
         let mut st = State::default();
+        let mut led = Ledger::default();
 
-        let first = collect(&opts, &mut st, &sender);
+        let first = collect(&opts, &mut st, &mut led, &sender);
         assert_eq!(namer.calls.get(), 1);
         assert_eq!(first.names_assigned, 0);
         // 名前がなくても送る
@@ -881,15 +933,15 @@ mod tests {
         assert!(sender.sessions(0).iter().all(|s| s["title"].is_null()));
 
         for run in 2..=6 {
-            collect(&opts, &mut st, &sender);
+            collect(&opts, &mut st, &mut led, &sender);
             assert_eq!(namer.calls.get(), run, "run {run}");
         }
-        collect(&opts, &mut st, &sender);
-        collect(&opts, &mut st, &sender);
+        collect(&opts, &mut st, &mut led, &sender);
+        collect(&opts, &mut st, &mut led, &sender);
         assert_eq!(namer.calls.get(), 6);
         for key in ["claude_code:s1", "codex:c1", "claude_code:s2"] {
-            assert_eq!(st.sessions[key].name_attempts, 2, "{key}");
-            assert_eq!(st.sessions[key].title, None, "{key}");
+            assert_eq!(led.sessions[key].name_attempts, 2, "{key}");
+            assert_eq!(led.sessions[key].title, None, "{key}");
         }
         assert!(user_texts_of(&st, "s1").is_empty());
         assert!(user_texts_of(&st, "s2").is_empty());
@@ -904,15 +956,16 @@ mod tests {
         let opts = env.opts(ts("2026-11-22T00:00:00.000Z"), Some((&namer, 1, 10)), ChunkLimits { ..DEFAULT_CHUNK });
         let sender = FakeSender::ok();
         let mut st = State::default();
+        let mut led = Ledger::default();
 
         // 1回失敗したら、その回は残りを試さない
         for run in 1..=4 {
-            let report = collect(&opts, &mut st, &sender);
+            let report = collect(&opts, &mut st, &mut led, &sender);
             assert_eq!(namer.calls.get(), run, "run {run}");
             assert_eq!(report.names_assigned, 0);
         }
         for key in ["claude_code:s1", "codex:c1", "claude_code:s2"] {
-            assert_eq!(st.sessions.get(key).map_or(0, |s| s.name_attempts), 0, "{key}");
+            assert_eq!(led.sessions.get(key).map_or(0, |s| s.name_attempts), 0, "{key}");
         }
         // 材料は次の回のために残す
         assert!(!user_texts_of(&st, "s1").is_empty());
@@ -921,7 +974,7 @@ mod tests {
         // claude が使えるようになったら名付ける
         let namer = FakeNamer::new(Some("デモの改修"));
         let opts = env.opts(ts("2026-11-22T00:00:00.000Z"), Some((&namer, 1, 10)), ChunkLimits { ..DEFAULT_CHUNK });
-        let report = collect(&opts, &mut st, &sender);
+        let report = collect(&opts, &mut st, &mut led, &sender);
         assert_eq!(report.names_assigned, 3);
         assert!(user_texts_of(&st, "s1").is_empty());
     }
@@ -931,14 +984,15 @@ mod tests {
         let env = Env::new("truncated");
         let sender = FakeSender::ok();
         let mut st = State::default();
-        collect(&env.plain(), &mut st, &sender);
+        let mut led = Ledger::default();
+        collect(&env.plain(), &mut st, &mut led, &sender);
         let calls = sender.calls();
 
         // 同じファイル（同じ inode）を短く書き直す
         let text = std::fs::read_to_string(env.s1()).unwrap();
         let short: String = text.lines().take(3).map(|l| format!("{l}\n")).collect();
         std::fs::write(env.s1(), &short).unwrap();
-        let report = collect(&env.plain(), &mut st, &sender);
+        let report = collect(&env.plain(), &mut st, &mut led, &sender);
         assert_eq!(report.bytes_read, short.len() as u64);
         // 送ったものより小さくなったので、送らずに知らせる
         assert_eq!(sender.calls(), calls);
@@ -946,7 +1000,7 @@ mod tests {
 
         // 状態は、何も読んでいない状態から全部読んだときと同じ
         let mut fresh = State::default();
-        collect(&env.plain(), &mut fresh, &FakeSender::ok());
+        collect(&env.plain(), &mut fresh, &mut Ledger::default(), &FakeSender::ok());
         assert_eq!(built(&env, &st, "claude_code:s1"), built(&env, &fresh, "claude_code:s1"));
     }
 
@@ -959,12 +1013,13 @@ mod tests {
         let env = Env::new("vanished_subagent");
         let sender = FakeSender::ok();
         let mut st = State::default();
-        collect(&env.plain(), &mut st, &sender);
+        let mut led = Ledger::default();
+        collect(&env.plain(), &mut st, &mut led, &sender);
         let calls = sender.calls();
         let before = built(&env, &st, "claude_code:s1");
 
         std::fs::remove_file(env.claude().join("-tmp-demo/s1/subagents/agent-a1.jsonl")).unwrap();
-        let report = collect(&env.plain(), &mut st, &sender);
+        let report = collect(&env.plain(), &mut st, &mut led, &sender);
         assert_eq!(sender.calls(), calls);
         assert_eq!(report, CollectReport::default());
         assert!(st.files.values().any(|e| matches!(&e.claude, Some((id, false, _)) if id == "s1")));
@@ -976,12 +1031,13 @@ mod tests {
         let env = Env::new("vanished_codex_child");
         let sender = FakeSender::ok();
         let mut st = State::default();
-        collect(&env.plain(), &mut st, &sender);
+        let mut led = Ledger::default();
+        collect(&env.plain(), &mut st, &mut led, &sender);
         let calls = sender.calls();
         let before = built(&env, &st, "codex:c1");
 
         std::fs::remove_file(env.codex().join("sessions/2026/11/20/rollout-b.jsonl")).unwrap();
-        let report = collect(&env.plain(), &mut st, &sender);
+        let report = collect(&env.plain(), &mut st, &mut led, &sender);
         assert_eq!(sender.calls(), calls);
         assert_eq!(report, CollectReport::default());
         assert!(st.files.values().any(|e| e.codex.as_ref().is_some_and(|c| c.thread_id.as_deref() == Some("c2"))));
@@ -989,7 +1045,7 @@ mod tests {
 
         // 系統のファイルが全部消えたら、途中結果も捨てる
         std::fs::remove_file(env.codex().join("sessions/2026/11/20/rollout-a.jsonl")).unwrap();
-        collect(&env.plain(), &mut st, &sender);
+        collect(&env.plain(), &mut st, &mut led, &sender);
         assert_eq!(sender.calls(), calls);
         assert!(!st.files.values().any(|e| e.codex.as_ref().is_some_and(|c| c.thread_id.as_deref() == Some("c2"))));
     }
@@ -999,11 +1055,12 @@ mod tests {
         let env = Env::new("whole_session_removed");
         let sender = FakeSender::ok();
         let mut st = State::default();
-        collect(&env.plain(), &mut st, &sender);
+        let mut led = Ledger::default();
+        collect(&env.plain(), &mut st, &mut led, &sender);
         let calls = sender.calls();
 
         std::fs::remove_file(env.claude().join("-tmp-demo/s2.jsonl")).unwrap();
-        let report = collect(&env.plain(), &mut st, &sender);
+        let report = collect(&env.plain(), &mut st, &mut led, &sender);
         assert_eq!(sender.calls(), calls);
         assert_eq!(report, CollectReport::default());
         assert!(!st.files.values().any(|e| matches!(&e.claude, Some((id, _, _)) if id == "s2")));
@@ -1015,14 +1072,15 @@ mod tests {
         let env = Env::new("stat_failure");
         let sender = FakeSender::ok();
         let mut st = State::default();
-        collect(&env.plain(), &mut st, &sender);
+        let mut led = Ledger::default();
+        collect(&env.plain(), &mut st, &mut led, &sender);
         let calls = sender.calls();
 
         // 一覧には出るが stat できない（リンク先がない）
         let s2 = env.claude().join("-tmp-demo/s2.jsonl");
         std::fs::remove_file(&s2).unwrap();
         std::os::unix::fs::symlink(env.root.join("missing.jsonl"), &s2).unwrap();
-        let report = collect(&env.plain(), &mut st, &sender);
+        let report = collect(&env.plain(), &mut st, &mut led, &sender);
         assert_eq!(sender.calls(), calls);
         assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
         assert!(report.errors[0].contains("cannot stat"));
@@ -1034,26 +1092,27 @@ mod tests {
         let env = Env::new("shrinking");
         let sender = FakeSender::ok();
         let mut st = State::default();
-        collect(&env.plain(), &mut st, &sender);
+        let mut led = Ledger::default();
+        collect(&env.plain(), &mut st, &mut led, &sender);
         let calls = sender.calls();
 
         // 送った記録の方が大きく、内容も違うことにする
-        let entry = st.sessions.get_mut("claude_code:s1").unwrap();
+        let entry = led.sessions.get_mut("claude_code:s1").unwrap();
         entry.sent_tokens += 1;
         entry.sent_fingerprint = Some(12345);
-        let report = collect(&env.plain(), &mut st, &sender);
+        let report = collect(&env.plain(), &mut st, &mut led, &sender);
         assert_eq!(sender.calls(), calls);
         assert_eq!(report.sessions_changed, 1);
         assert_eq!(report.sessions_sent, 0);
         assert_eq!(report.errors, ["skipped shrinking session claude_code:s1"]);
-        assert_eq!(st.sessions["claude_code:s1"].sent_fingerprint, Some(12345));
+        assert_eq!(led.sessions["claude_code:s1"].sent_fingerprint, Some(12345));
 
         // 送った記録と同じ大きさなら送り、記録を更新する
         let s1 = built(&env, &st, "claude_code:s1");
-        st.sessions.get_mut("claude_code:s1").unwrap().sent_tokens -= 1;
-        collect(&env.plain(), &mut st, &sender);
+        led.sessions.get_mut("claude_code:s1").unwrap().sent_tokens -= 1;
+        collect(&env.plain(), &mut st, &mut led, &sender);
         assert_eq!(sender.ids(calls), ["s1"]);
-        let entry = &st.sessions["claude_code:s1"];
+        let entry = &led.sessions["claude_code:s1"];
         assert_ne!(entry.sent_fingerprint, Some(12345));
         assert_eq!(entry.sent_messages, s1.blocks.iter().map(|b| u64::from(b.message_count)).sum::<u64>());
         assert_eq!(entry.sent_tokens, 14 + 8 + 100 + 20); // サブエージェント分を含む
@@ -1064,7 +1123,8 @@ mod tests {
         let env = Env::new("replaced");
         let sender = FakeSender::ok();
         let mut st = State::default();
-        collect(&env.plain(), &mut st, &sender);
+        let mut led = Ledger::default();
+        collect(&env.plain(), &mut st, &mut led, &sender);
         let calls = sender.calls();
         let files = st.files.len();
 
@@ -1077,7 +1137,7 @@ mod tests {
         )
         .unwrap();
         std::fs::rename(&tmp, &s2).unwrap();
-        collect(&env.plain(), &mut st, &sender);
+        collect(&env.plain(), &mut st, &mut led, &sender);
         assert_eq!(st.files.len(), files);
         let sent = sender.sessions(calls);
         assert_eq!(sender.ids(calls), ["s2"]);
@@ -1091,14 +1151,15 @@ mod tests {
         let env = Env::new("archived");
         let sender = FakeSender::ok();
         let mut st = State::default();
-        collect(&env.plain(), &mut st, &sender);
+        let mut led = Ledger::default();
+        collect(&env.plain(), &mut st, &mut led, &sender);
         let calls = sender.calls();
         let files = st.files.len();
 
         let archived = env.codex().join("archived_sessions");
         std::fs::create_dir_all(&archived).unwrap();
         std::fs::rename(env.codex().join("sessions/2026/11/20/rollout-a.jsonl"), archived.join("rollout-a.jsonl")).unwrap();
-        let report = collect(&env.plain(), &mut st, &sender);
+        let report = collect(&env.plain(), &mut st, &mut led, &sender);
         assert_eq!(sender.calls(), calls);
         assert_eq!(report, CollectReport::default());
         assert_eq!(st.files.len(), files);
@@ -1110,14 +1171,15 @@ mod tests {
         let env = Env::new("copied");
         let sender = FakeSender::ok();
         let mut st = State::default();
-        collect(&env.plain(), &mut st, &sender);
+        let mut led = Ledger::default();
+        collect(&env.plain(), &mut st, &mut led, &sender);
         let calls = sender.calls();
 
         // move ではなく copy（inode が変わる）。元も残っている
         let archived = env.codex().join("archived_sessions");
         std::fs::create_dir_all(&archived).unwrap();
         std::fs::copy(env.codex().join("sessions/2026/11/20/rollout-a.jsonl"), archived.join("rollout-a.jsonl")).unwrap();
-        let report = collect(&env.plain(), &mut st, &sender);
+        let report = collect(&env.plain(), &mut st, &mut led, &sender);
         assert_eq!(report.files_read, 1);
         assert_eq!(sender.calls(), calls);
         assert_eq!(report.sessions_changed, 0);

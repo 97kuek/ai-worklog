@@ -6,3 +6,4 @@ pub mod namer;
 pub mod config;
 pub mod keychain;
 pub mod http;
+pub mod fsutil;
