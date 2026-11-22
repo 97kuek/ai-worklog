@@ -16,8 +16,8 @@ use crate::domain::{build_session, Millis, Session};
 
 /// これだけ名付けに失敗したら、それ以降は試さない
 const MAX_NAME_ATTEMPTS: u8 = 2;
-/// エラーに残す、拒否されたときの応答本文の長さ
-const MAX_ERROR_BODY_CHARS: usize = 200;
+/// エラーに残す、拒否されたときの応答の error / path の長さ
+const MAX_ERROR_FIELD_CHARS: usize = 200;
 
 pub struct CollectOptions<'a> {
     pub claude_projects_dir: PathBuf,
@@ -330,7 +330,7 @@ fn forget_user_texts(state: &mut State) {
 
 /// 送った内容から変わったセッションを小分けにして送る。成功した小分けだけ送った印を付ける
 fn send_changed(opts: &CollectOptions, state: &mut State, built: &[Built], sender: &dyn Sender, report: &mut CollectReport) {
-    let mut targets: Vec<(&Built, Option<String>, u64)> = Vec::new();
+    let mut targets: Vec<Target> = Vec::new();
     for b in built {
         let entry = state.sessions.get(&b.key);
         let title = entry.and_then(|e| e.title.clone());
@@ -349,29 +349,77 @@ fn send_changed(opts: &CollectOptions, state: &mut State, built: &[Built], sende
     }
 
     let blocks: Vec<usize> = targets.iter().map(|(b, _, _)| b.session.blocks.len()).collect();
-    for range in chunk(&blocks, &opts.chunk) {
-        let part = &targets[range];
+    let send = |part: &[Target]| {
         let items: Vec<Outgoing> =
             part.iter().map(|(b, title, _)| Outgoing { session: &b.session, title: title.as_deref() }).collect();
-        match sender.send(&to_ingest_json(&opts.machine_name, &items)) {
-            Ok(_) => {
-                for (b, _, fp) in part {
-                    let entry = state.sessions.entry(b.key.clone()).or_default();
-                    entry.sent_fingerprint = Some(*fp);
-                    (entry.sent_messages, entry.sent_tokens) = totals(&b.session);
-                }
-                report.sessions_sent += part.len();
-            }
+        sender.send(&to_ingest_json(&opts.machine_name, &items))
+    };
+    let mut mark_sent = |part: &[Target], report: &mut CollectReport| {
+        for (b, _, fp) in part {
+            let entry = state.sessions.entry(b.key.clone()).or_default();
+            entry.sent_fingerprint = Some(*fp);
+            (entry.sent_messages, entry.sent_tokens) = totals(&b.session);
+        }
+        report.sessions_sent += part.len();
+    };
+    let auth_failed = |status: u16, report: &mut CollectReport| {
+        report.auth_failed = true;
+        report.errors.push(format!("authentication failed (HTTP {status}); stopped sending"));
+    };
+    'chunks: for range in chunk(&blocks, &opts.chunk) {
+        let part = &targets[range];
+        match send(part) {
+            Ok(_) => mark_sent(part, report),
             Err(SendError::Auth(status)) => {
-                report.auth_failed = true;
-                report.errors.push(format!("authentication failed (HTTP {status}); stopped sending"));
+                auth_failed(status, report);
                 break;
+            }
+            Err(SendError::Rejected { status, body }) => {
+                report.chunks_failed += 1;
+                if let [(b, _, _)] = part {
+                    report.errors.push(rejected(&b.key, status, &body));
+                    continue;
+                }
+                // どれか1つが拒否の原因。1つずつ送り直し、送れるものは送る
+                for one in part.chunks(1) {
+                    match send(one) {
+                        Ok(_) => mark_sent(one, report),
+                        Err(SendError::Auth(status)) => {
+                            auth_failed(status, report);
+                            break 'chunks;
+                        }
+                        Err(SendError::Rejected { status, body }) => report.errors.push(rejected(&one[0].0.key, status, &body)),
+                        Err(e) => report.errors.push(describe(&e, 1)),
+                    }
+                }
             }
             Err(e) => {
                 report.chunks_failed += 1;
                 report.errors.push(describe(&e, part.len()));
             }
         }
+    }
+}
+
+type Target<'a> = (&'a Built, Option<String>, u64);
+
+/// 拒否された1セッションのエラー行。応答本文は、APIの error と path だけを残す
+fn rejected(key: &str, status: u16, body: &str) -> String {
+    let mut line = format!("rejected session {key}: {status}");
+    line.push_str(&api_error_detail(body));
+    line
+}
+
+/// 応答本文の JSON から error と path だけを取り出す（利用者のデータが混ざらないように）
+fn api_error_detail(body: &str) -> String {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else { return String::new() };
+    let field = |name: &str| {
+        v.get(name).and_then(|f| f.as_str()).map(|s| s.chars().take(MAX_ERROR_FIELD_CHARS).collect::<String>())
+    };
+    match (field("error"), field("path")) {
+        (Some(e), Some(p)) => format!(" ({e} at {p})"),
+        (Some(e), None) => format!(" ({e})"),
+        _ => String::new(),
     }
 }
 
@@ -385,10 +433,7 @@ fn totals(s: &Session) -> (u64, u64) {
 fn describe(e: &SendError, sessions: usize) -> String {
     let what = match e {
         SendError::Auth(status) => format!("authentication failed (HTTP {status})"),
-        SendError::Rejected { status, body } => {
-            let body: String = body.chars().take(MAX_ERROR_BODY_CHARS).collect();
-            format!("rejected (HTTP {status}): {body}")
-        }
+        SendError::Rejected { status, body } => format!("rejected (HTTP {status}){}", api_error_detail(body)),
         SendError::Server(status) => format!("server error (HTTP {status})"),
         SendError::Network(msg) => format!("network error: {msg}"),
     };
@@ -487,6 +532,8 @@ mod tests {
     struct FakeSender {
         bodies: RefCell<Vec<String>>,
         script: RefCell<VecDeque<Result<SendOk, SendError>>>,
+        /// この native_session_id を含む本文は、いつも 400 で拒否する
+        reject_id: Option<String>,
     }
 
     impl FakeSender {
@@ -495,7 +542,10 @@ mod tests {
         }
         /// 決めた結果を順に返す。尽きたら成功
         fn with(results: Vec<Result<SendOk, SendError>>) -> FakeSender {
-            FakeSender { bodies: RefCell::new(vec![]), script: RefCell::new(results.into()) }
+            FakeSender { bodies: RefCell::new(vec![]), script: RefCell::new(results.into()), reject_id: None }
+        }
+        fn rejecting(id: &str) -> FakeSender {
+            FakeSender { reject_id: Some(id.to_owned()), ..FakeSender::ok() }
         }
         fn calls(&self) -> usize {
             self.bodies.borrow().len()
@@ -518,6 +568,12 @@ mod tests {
     impl Sender for FakeSender {
         fn send(&self, body: &str) -> Result<SendOk, SendError> {
             self.bodies.borrow_mut().push(body.to_owned());
+            if let Some(id) = &self.reject_id
+                && body.contains(&format!("\"native_session_id\":\"{id}\""))
+            {
+                let body = r#"{"error":"invalid_payload","path":"sessions[1].blocks[0].tokens.input","detail":"secret user text"}"#;
+                return Err(SendError::Rejected { status: 400, body: body.into() });
+            }
             self.script.borrow_mut().pop_front().unwrap_or(Ok(SendOk { sessions: 0, blocks: 0, rows_changed: 0 }))
         }
     }
@@ -679,6 +735,46 @@ mod tests {
         let third = collect(&opts, &mut st, &sender);
         assert_eq!(sender.calls(), 3);
         assert_eq!(third, CollectReport::default());
+    }
+
+    #[test]
+    fn rejected_chunk_is_resent_one_session_at_a_time() {
+        let env = Env::new("rejected_chunk");
+        let sender = FakeSender::rejecting("c1");
+        let mut st = State::default();
+        // s1, c1, s2 が1つの小分けに入る
+        let report = collect(&env.plain(), &mut st, &sender);
+        assert_eq!(sender.calls(), 4); // 3件まとめて拒否 → 1件ずつ3回
+        assert_eq!(sender.ids(1), ["s1", "c1", "s2"]);
+        assert_eq!((report.sessions_changed, report.sessions_sent, report.chunks_failed), (3, 2, 1));
+        assert!(!report.auth_failed);
+        assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+        assert!(report.errors[0].starts_with("rejected session codex:c1: 400"), "{:?}", report.errors);
+        assert!(!report.errors[0].contains("secret user text"), "{:?}", report.errors);
+        assert!(st.sessions["claude_code:s1"].sent_fingerprint.is_some());
+        assert!(st.sessions["claude_code:s2"].sent_fingerprint.is_some());
+        assert_eq!(st.sessions.get("codex:c1").and_then(|s| s.sent_fingerprint), None);
+
+        // 次の回は c1 だけを送ろうとして、また拒否される
+        let calls = sender.calls();
+        let again = collect(&env.plain(), &mut st, &sender);
+        assert_eq!(sender.ids(calls), ["c1"]);
+        assert_eq!((again.sessions_changed, again.sessions_sent), (1, 0));
+        assert!(again.errors[0].starts_with("rejected session codex:c1: 400"), "{:?}", again.errors);
+    }
+
+    #[test]
+    fn auth_failure_during_single_resends_stops_everything() {
+        let env = Env::new("rejected_then_auth");
+        let sender = FakeSender::with(vec![
+            Err(SendError::Rejected { status: 400, body: "{}".into() }),
+            Err(SendError::Auth(401)),
+        ]);
+        let mut st = State::default();
+        let report = collect(&env.plain(), &mut st, &sender);
+        assert_eq!(sender.calls(), 2);
+        assert!(report.auth_failed);
+        assert_eq!(report.sessions_sent, 0);
     }
 
     #[test]
