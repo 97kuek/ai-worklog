@@ -14,9 +14,6 @@ function chartCeiling(peakMs: number) {
   return (step ?? Math.ceil(peakMinutes / 240) * 240) * 60_000;
 }
 
-// Keep the selected scale when moving between dates or drilling into a day.
-let utilization = false;
-
 function percentage(value: number, total: number) {
   if (!total) return "—";
   const percent = 100 * value / total;
@@ -32,8 +29,45 @@ function rankedProjects(bucket: ActivityBucket) {
     b.ms - a.ms || b.tasks.size - a.tasks.size || projectName(left).localeCompare(projectName(right)));
 }
 
+interface ProjectSeries {
+  name: string;
+  keys: ProjectKey[];
+  style: number;
+}
+
+function seriesTime(bucket: ActivityBucket, series: ProjectSeries) {
+  return series.keys.reduce<number>((sum, key) => sum + (bucket.projects.get(key)?.ms ?? 0), 0);
+}
+
+function projectPie(bucket: ActivityBucket, series: ProjectSeries[]) {
+  if (!bucket.ms) return el("p", "stats-empty-hour", "No active time in this period.");
+  const figure = el("figure", "project-share");
+  const pie = el("div", "project-pie");
+  // The adjacent legend gives the exact value and share of every slice in reading order.
+  pie.setAttribute("aria-hidden", "true");
+  const legend = el("ul", "share-legend");
+  legend.setAttribute("aria-label", "Project shares of active time");
+  let elapsed = 0;
+  for (const group of series) {
+    const ms = seriesTime(bucket, group);
+    if (!ms) continue;
+    const start = elapsed / bucket.ms;
+    elapsed += ms;
+    const slice = el("span", "series-" + group.style);
+    slice.style.maskImage = `conic-gradient(transparent 0 ${start}turn, black ${start}turn ${elapsed / bucket.ms}turn, transparent 0)`;
+    pie.append(slice);
+    const item = el("li");
+    const swatch = el("span", "stats-swatch series-" + group.style);
+    swatch.setAttribute("aria-hidden", "true");
+    item.append(swatch, el("span", "", group.name), el("strong", "", duration(ms)),
+      el("span", "share-percent", percentage(ms, bucket.ms)));
+    legend.append(item);
+  }
+  figure.append(pie, legend);
+  return figure;
+}
+
 function projectTable(bucket: ActivityBucket) {
-  if (!bucket.projects.size) return el("p", "stats-empty-hour", "No projects in this period.");
   const table = el("table", "stats-table project-table");
   table.setAttribute("aria-label", "Project activity");
   const header = table.createTHead().insertRow();
@@ -90,7 +124,7 @@ export function renderStats(root: HTMLElement, data: WeekData, start: Date, end:
   const plot = el("div", weekly ? "stats-plot weekly-plot" : "stats-plot");
   const axis = el("div", "stats-axis");
   axis.setAttribute("aria-hidden", "true");
-  const gridLabels = utilization ? ["100%", "50%", "0%"] : [ceiling, ceiling / 2, 0].map(duration);
+  const gridLabels = [ceiling, ceiling / 2, 0].map(duration);
   for (const label of gridLabels) axis.append(el("span", "", label));
   const area = el("div", "stats-bars");
   area.setAttribute("role", "group");
@@ -106,15 +140,13 @@ export function renderStats(root: HTMLElement, data: WeekData, start: Date, end:
     button.type = "button";
     const date = addDays(start, index);
     const from = weekly ? +date : stats.hourlySlots[index]!.from;
-    const to = weekly ? +addDays(date, 1) : stats.hourlySlots[index]!.to;
-    const capacity = to - from;
     const label = [weekly ? dayLabel.format(date) : hourLabels[index]];
     if (from > now) label.push("Upcoming");
-    else label.push(duration(bucket.ms), percentage(bucket.ms, capacity) + " utilization");
+    else label.push(duration(bucket.ms));
     const stack = el("span", "stats-stack");
-    stack.style.height = (100 * bucket.ms / (utilization ? capacity : ceiling)) + "%";
+    stack.style.height = (100 * bucket.ms / ceiling) + "%";
     for (const group of series) {
-      const ms = group.keys.reduce((sum, key) => sum + (bucket.projects.get(key)?.ms ?? 0), 0);
+      const ms = seriesTime(bucket, group);
       if (!ms) continue;
       const segment = el("span", "series-" + group.style);
       segment.style.height = (100 * ms / bucket.ms) + "%";
@@ -147,55 +179,38 @@ export function renderStats(root: HTMLElement, data: WeekData, start: Date, end:
     item.append(swatch, group.name);
     legend.append(item);
   }
-  const scale = el("div", "stats-scale");
-  scale.setAttribute("role", "group");
-  scale.setAttribute("aria-label", "Vertical axis");
-  for (const [index, text] of ["Active time", "Utilization"].entries()) {
-    const button = el("button", "", text);
-    button.type = "button";
-    const usePercent = index === 1;
-    button.setAttribute("aria-pressed", String(utilization === usePercent));
-    button.onclick = () => {
-      if (utilization === usePercent) return;
-      utilization = usePercent;
-      renderStats(root, data, start, end, options);
-      root.querySelector<HTMLButtonElement>('.stats-scale [aria-pressed="true"]')?.focus();
-    };
-    scale.append(button);
-  }
-  chart.append(head, scale);
-  if (utilization) chart.append(el("p", "stats-scale-note",
-    weekly ? "Share of each full day spent active." : "Share of each full hour spent active."));
-  chart.append(plot);
+  chart.append(head, plot);
   head.title = "Overlapping work counts once. Shared time is split equally between active projects.";
   if (legend.childElementCount) chart.append(legend);
 
-  const projects = el("section", "stats-models");
-  const projectHead = el("div", "stats-head");
-  projectHead.append(el("h2", "", "Projects"));
-  const projectResults = el("div");
-  projects.append(projectHead, projectResults);
-
-  const models = el("section", "stats-models");
-  const modelHead = el("div", "stats-head");
+  const breakdown = el("section", "stats-models");
+  const detailHead = el("div", "stats-head");
+  const detailsTitle = el("h2", "", "Activity breakdown");
   const hours: [string, string][] = hourLabels.map((label, i) => [String(i), label]);
-  const select = filterMenu("stats-hour-filter", "Filter by hour", [["", "All hours"], ...hours],
+  const select = filterMenu("stats-hour-filter", "Filter breakdown by hour", [["", "All hours"], ...hours],
     root.querySelector<HTMLButtonElement>("#stats-hour-filter")?.value ?? "", selectHour);
-  const selection = el("span", "stats-selection");
+  detailHead.append(detailsTitle, select.root);
+  const selection = el("p", "stats-selection");
   selection.setAttribute("role", "status");
-  const controls = el("div", "stats-controls");
-  controls.append(selection, select.root);
-  projectHead.append(controls);
-  modelHead.append(el("h2", "", "Model usage"));
+  const projects = el("section", "stats-detail");
+  const pieResults = el("div");
+  const projectResults = el("div");
+  projects.append(el("h3", "", "Project share of active time"), pieResults, projectResults);
+  const models = el("section", "stats-detail");
   const results = el("div", "stats-table-scroll");
-  models.append(modelHead, results);
+  models.append(el("h3", "", "Model usage"), results);
+  breakdown.append(detailHead, selection, projects, models);
+
   function selectHour(value: string) {
     select.setValue(value);
     if (!weekly) bars.forEach((button, i) => button.setAttribute("aria-pressed", String(value === String(i))));
     const bucket = value === "" ? undefined : (weekly ? stats.hours : buckets)[Number(value)];
-    selection.textContent = bucket ? duration(bucket.ms) : "";
     const selected = bucket ?? stats.period;
-    projectResults.replaceChildren(projectTable(selected));
+    const scope = weekly ? "across all days this week" : "on this day";
+    const range = bucket ? hourLabels[Number(value)] : "All hours";
+    selection.textContent = range + " " + scope + " · " + duration(selected.ms) + " active";
+    pieResults.replaceChildren(projectPie(selected, series));
+    projectResults.replaceChildren(...(selected.projects.size ? [projectTable(selected)] : []));
     const counts = stats.modelCounts(selected.tasks);
     if (!counts.length) {
       results.replaceChildren(el("p", "stats-empty-hour", bucket ? "No work blocks in this hour." : "No work blocks in this period."));
@@ -220,5 +235,5 @@ export function renderStats(root: HTMLElement, data: WeekData, start: Date, end:
     results.replaceChildren(table);
   }
   selectHour(select.trigger.value);
-  root.replaceChildren(chart, projects, models);
+  root.replaceChildren(chart, breakdown);
 }
