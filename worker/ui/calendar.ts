@@ -120,7 +120,7 @@ export function renderCalendar(root: HTMLElement, sessions: Session[], blocks: B
     key.append(item);
   }
   if (key.childElementCount) calendar.append(key);
-  const picker = el("div", "cal-picker");
+  const picker = el("div", "cal-picker week-strip");
   picker.setAttribute("role", "group");
   picker.setAttribute("aria-label", "Choose a day");
   const scroller = el("div", "cal-scroll");
@@ -164,10 +164,13 @@ export function renderCalendar(root: HTMLElement, sessions: Session[], blocks: B
   days.forEach((pieces, i) => {
     const date = dates[i]!;
     const name = dayLabel.format(date);
-    const button = el("button", "cal-pick");
+    const button = el("button", "strip-day");
     button.type = "button";
     button.setAttribute("aria-label", name);
-    button.append(el("span", "", weekday.format(date)), el("strong", "", String(date.getDate())));
+    const top = el("span", "strip-top");
+    top.append(el("span", "weekday", weekday.format(date)), el("span", "strip-date", String(date.getDate())));
+    button.append(top);
+    button.classList.toggle("is-today", +date === today);
     if (+date === today) button.setAttribute("aria-current", "date");
     button.addEventListener("click", () => { selectDay(i); focusTime(pieces); });
     buttons.push(button);

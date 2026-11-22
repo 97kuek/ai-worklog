@@ -224,37 +224,9 @@
   .work-calendar {
     --cal-gutter: 68px;
   }
-  .work-calendar .cal-picker {
-    display: grid;
-    grid-template-columns: repeat(7, minmax(0, 1fr));
-    gap: 2px;
-    margin-bottom: 8px;
-  }
-  .work-calendar .cal-pick {
-    display: grid;
-    place-content: center;
-    min-height: 50px;
-    gap: 2px;
-    padding: 2px;
-    border: 0;
-    border-radius: var(--pill);
-    background: transparent;
-    color: var(--cal-muted);
-    cursor: pointer;
-    font: inherit;
-  }
-  .work-calendar .cal-pick strong {
-    font-size: var(--type-heading);
-    line-height: 1.15;
-  }
-  .work-calendar .cal-pick[aria-current="date"] strong {
-    text-decoration: underline;
-    text-underline-offset: 3px;
-  }
-  .work-calendar .cal-pick[aria-pressed="true"] {
-    color: var(--white);
-    background: var(--accent);
-  }
+  .work-calendar .cal-picker { display: grid; }
+  .cal-picker .strip-day { align-items: center; justify-content: center; min-height: 52px; padding: 4px 0; }
+  .cal-picker .strip-top { display: grid; gap: 0; justify-items: center; }
   .work-calendar .cal-scroll {
     max-height: 65vh;
   }
