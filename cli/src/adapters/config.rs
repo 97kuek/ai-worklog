@@ -56,21 +56,10 @@ pub fn load(path: &Path) -> Result<Config, String> {
     serde_json::from_str(&text).map_err(|e| format!("invalid config {}: {e}", path.display()))
 }
 
-/// Writes a temp file next to the target, then renames it into place.
+/// Writes a temp file next to the target, then renames it into place (mode 0600).
 pub fn save(path: &Path, c: &Config) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
-    let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
-    tmp_name.push(format!(".tmp{}", std::process::id()));
-    let tmp = path.with_file_name(tmp_name);
     let json = serde_json::to_string_pretty(c).map_err(std::io::Error::other)?;
-    std::fs::write(&tmp, json + "\n")?;
-    std::fs::rename(&tmp, path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp);
-    })
+    super::fsutil::write_atomically(path, (json + "\n").as_bytes())
 }
 
 #[cfg(test)]
@@ -104,6 +93,8 @@ mod tests {
         let p2 = dir.join("new").join("c.json");
         save(&p2, &c).unwrap();
         assert_eq!(load(&p2).unwrap(), c);
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&p2).unwrap().permissions().mode() & 0o777, 0o600);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

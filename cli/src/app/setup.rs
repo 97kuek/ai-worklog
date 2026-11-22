@@ -257,7 +257,7 @@ pub fn check_expiry(expires: Option<&str>, now: Millis) -> (bool, String) {
 /// 1行を追記する。上限を超えたら新しい側の半分だけ残す
 pub fn append_log_line(path: &Path, line: &str, max_bytes: u64) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        crate::adapters::fsutil::create_private_dir(parent)?;
     }
     let mut f = OpenOptions::new().create(true).append(true).open(path)?;
     f.write_all(format!("{line}\n").as_bytes())?;

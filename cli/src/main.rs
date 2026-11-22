@@ -3,6 +3,7 @@ use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, SystemTime};
 
 use ai_worklog::adapters::config::{self, Config};
+use ai_worklog::adapters::fsutil;
 use ai_worklog::adapters::http::HttpSender;
 use ai_worklog::adapters::keychain;
 use ai_worklog::adapters::namer::{ClaudeCliNamer, Namer};
@@ -223,7 +224,7 @@ fn run_setup(mut parser: lexopt::Parser) -> Result<ExitCode, lexopt::Error> {
         println!("# {}\n{plist}", plist_path.display());
     } else {
         let loaded = (|| -> Result<(), String> {
-            std::fs::create_dir_all(home.join("logs")).map_err(|e| format!("cannot create logs dir: {e}"))?;
+            fsutil::create_private_dir(&home.join("logs")).map_err(|e| format!("cannot create logs dir: {e}"))?;
             let dir = plist_path.parent().ok_or("bad plist path")?;
             std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
             std::fs::write(&plist_path, &plist).map_err(|e| format!("cannot write {}: {e}", plist_path.display()))?;
