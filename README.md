@@ -50,7 +50,7 @@ The layout reference is [DESIGN.md](DESIGN.md). Taskfolio uses white surfaces, i
 
 - **Work log** shows work blocks for a Sunday–Saturday week. Waiting tasks have a pale purple background. The work location is the final directory name recorded by the collector. Filter by day or latest task status, change the date sort order, or select a task to see its details.
 - **Calendar** displays simultaneous blocks side by side and splits them at local midnight. Status labels and colored edges indicate the latest task status. On smaller screens, select one of the seven days.
-- **Board** lets you plan requests in Backlog, move them to Queued, and select **Start** to run a request on a registered Mac. Choose a project and engine on the card first. Open a waiting session or drag it into Completed to mark it complete.
+- **Board** lets you plan requests in Backlog, then move a card into Queued to run it. Drag the card on desktop or use its move action on your phone. The registered Mac takes the first waiting request it can run. Open a waiting session or drag it into Completed to mark it complete.
 - **Activity** stacks each project's active time by local hour in Daily and by day in Weekly. Select a weekday to open its hourly chart. Concurrent tasks each contribute their duration. The Projects table shows active time and distinct task counts for every project, including those grouped under Other projects in the chart. Select an hour to filter both Projects and Model usage. Each task counts once per recorded combination of engine, model and effort.
 
 - **Skills** lists the tool, name, and description reported by Claude Code and Codex. Matching names and descriptions appear once with both tools. The collector queries both tools from the user’s home directory by default. Set `skills_cwd` in the CLI configuration to include skills available in a specific project.
@@ -63,7 +63,7 @@ The Worker builds the UI from `worker/ui/` during Wrangler development and deplo
 
 ## Run a queued request on your Mac
 
-Sign in from the collector on the Mac and install the Claude Code or Codex CLI you plan to use. Create `runner.json` alongside Taskfolio’s `config.json`. Project names must match the Board, and executable and project paths must be absolute paths on that Mac. Include the engines you want to run.
+Sign in from the collector on the Mac and install the Claude Code or Codex CLI you plan to use. Create `runner.json` alongside Taskfolio’s `config.json`. Each key in `projects` is a stable project name shown on the Board. Its value is the absolute path to the checkout or worktree on this Mac. Use distinct keys for different repositories, including ones whose folders have the same name. To move a checkout, update the path under the existing key. To add a project, add another key and path. The runner reads this file on each poll. Include the engines you want to run.
 
 ```json
 {
@@ -78,7 +78,7 @@ Sign in from the collector on the Mac and install the Claude Code or Codex CLI y
 
 Build the updated CLI, install it at a stable path, and run `python3 scripts/install-runner.py /absolute/path/to/taskfolio` from this repository. For an installation with a custom Taskfolio home, pass `--state-dir /absolute/path/to/state`. The runner reuses the collector’s Cloudflare login and advertises the configured projects and engines while the Mac is awake and logged in.
 
-From Board on your phone or Mac, move a request to Queued and select **Start**. The project folder and provider executable are resolved on the Mac. The agent receives the request text and the model and effort specified on the card. One runner processes one request at a time. The card reports the result of the agent process. To disable future launches on this Mac, allow the current job to finish, then unload the agent with `launchctl bootout "gui/$(id -u)/dev.taskfolio.runner"` and remove its plist from `~/Library/LaunchAgents`.
+Choose a registered project and engine, then move the request from Backlog to Queued. The runner checks for work every 30 seconds while the Mac is awake and logged in. It executes one eligible request at a time in queue order. A queued request waits while its Mac is offline. You can return a waiting request to Backlog until a runner claims it. If execution fails, return the card to Backlog, correct its settings and queue it again. The Mac resolves the project folder and provider executable locally and reports the execution status to the Board. To disable future launches on this Mac, allow the current job to finish, then unload the agent with `launchctl bootout "gui/$(id -u)/dev.taskfolio.runner"` and remove its plist from `~/Library/LaunchAgents`.
 
 ## Session status
 

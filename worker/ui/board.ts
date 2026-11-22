@@ -1,4 +1,3 @@
-import type { StartRequest } from "./launch.js";
 import { planningLanes, type BoardRequest, type SaveRequest } from "./planning.js";
 import { countLabel, el, engineName, stateOf, statusLabel, titleOf, type Session } from "./shared.js";
 
@@ -23,7 +22,6 @@ export function renderBoard(
   complete: (id: string) => Promise<void>,
   plans: BoardRequest[],
   save: SaveRequest,
-  start: StartRequest,
   runnerProjects: string[],
 ) {
   const requests = pending.get(root) ?? new Map<string, Promise<void>>();
@@ -132,7 +130,7 @@ export function renderBoard(
     }
     columns.append(lane);
   }
-  const planning = planningLanes(plans, save, sessions, start, activity, runnerProjects);
+  const planning = planningLanes(plans, save, sessions, activity, runnerProjects);
   columns.prepend(...planning.sections);
   board.append(columns);
   root.replaceChildren(board);

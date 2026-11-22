@@ -1,4 +1,4 @@
-import { confirmAttempt, failureMessage, startAttempt, type StartRequest } from "./launch.js";
+import { failureMessage } from "./launch.js";
 import { requestComposer, type RequestFields, type RequestState, type BoardRequest, type Stage } from "./request-composer.js";
 import { countLabel, el, engineName, type Session } from "./shared.js";
 
@@ -20,7 +20,7 @@ function laneOf(item: BoardRequest) {
 }
 
 export function planningLanes(requests: BoardRequest[], save: SaveRequest, sessions: Session[],
-  start: StartRequest, activity: { running: RequestLane; completed: RequestLane }, runnerProjects: string[]) {
+  activity: { running: RequestLane; completed: RequestLane }, runnerProjects: string[]) {
   let items = new Map(requests.map(item => [item.id, item]));
   const busy = new Set<string>();
   const errors = new Map<string, string>();
@@ -34,12 +34,14 @@ export function planningLanes(requests: BoardRequest[], save: SaveRequest, sessi
     const list = el("ul", "board-list");
     section.append(heading, list);
     section.ondragover = event => {
-      if (dragged && items.get(dragged)?.stage !== stage) event.preventDefault();
+      if (!dragged || items.get(dragged)?.stage === stage || !event.dataTransfer) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
     };
     section.ondrop = event => {
       event.preventDefault();
       if (dragged && items.get(dragged)?.stage !== stage) void move(dragged, stage);
-      dragged = undefined;
+      endDrag();
     };
     function countRequests(n: number) {
       count.textContent = String(n);
@@ -78,38 +80,29 @@ export function planningLanes(requests: BoardRequest[], save: SaveRequest, sessi
     }
   }, focusCard, runnerProjects);
   lanes.backlog.list.before(composer.root);
-  async function perform(item: BoardRequest, action: () => Promise<void>, fallback: string) {
-    if (busy.has(item.id) || locked(item)) return;
-    busy.add(item.id);
-    revision++;
-    errors.delete(item.id);
-    draw();
-    try {
-      await action();
-    } catch (e) {
-      errors.set(item.id, e instanceof Error ? e.message : fallback);
-    } finally {
-      busy.delete(item.id);
-      revision++;
-      draw();
-    }
+  function endDrag() {
+    dragged = undefined;
+    lanes.backlog.section.classList.remove("drop-target");
+    lanes.queued.section.classList.remove("drop-target");
   }
   async function move(id: string, stage: Stage) {
     const item = items.get(id);
-    if (!item || item.stage === stage) return;
-    await perform(item, async () => {
+    if (!item || item.stage === stage || busy.has(id) || locked(item)) return;
+    busy.add(id);
+    revision++;
+    errors.delete(id);
+    draw();
+    try {
       await save(id, { stage });
       items.delete(id);
-      items.set(id, { ...item, stage });
-    }, "Could not move request.");
-  }
-  function startCard(item: BoardRequest) {
-    return perform(item, async () => {
-      const attempt = startAttempt(item.id, item.launch?.attempt_id);
-      const { launch } = await start(item.id, attempt);
-      items.set(item.id, { ...item, launch });
-      confirmAttempt(item.id);
-    }, "Could not start request.");
+      items.set(id, { ...item, stage, launch: stage === "queued" ? undefined : item.launch });
+    } catch (e) {
+      errors.set(id, e instanceof Error ? e.message : "Could not move request.");
+    } finally {
+      busy.delete(id);
+      revision++;
+      draw();
+    }
   }
   function requestCard(item: BoardRequest) {
     const card = el("li", "board-card request-card");
@@ -135,27 +128,32 @@ export function planningLanes(requests: BoardRequest[], save: SaveRequest, sessi
     card.draggable = !readOnly && !working;
     if (card.draggable) {
       card.ondragstart = event => {
+        if (!event.dataTransfer) return;
         dragged = item.id;
-        event.dataTransfer?.setData("text/plain", item.id);
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", item.id);
+        lanes[item.stage === "backlog" ? "queued" : "backlog"].section.classList.add("drop-target");
       };
-      card.ondragend = () => { dragged = undefined; };
+      card.ondragend = endDrag;
     }
     if (working) card.setAttribute("aria-busy", "true");
     const state = item.launch?.state;
     const status = state === "pending" ? "Waiting for Mac" : state === "claimed" ? "Starting on Mac"
       : state === "failed" ? "Launch failed" : undefined;
     if (status) card.append(el("p", "request-status", status));
-    if (state === "failed") card.append(el("p", "request-hint", failureMessage(item.launch?.error)));
-    if (item.stage === "queued" && !readOnly) {
-      const missing = [!item.project && "a project", !item.engine && "an engine"].filter(Boolean);
-      const button = el("button", "small-button request-start", state === "failed" ? "Retry" : "Start");
+    if (state === "failed") {
+      const retry = item.stage === "queued" ? " Move to Backlog, then queue again to retry." : "";
+      card.append(el("p", "request-hint", failureMessage(item.launch?.error) + retry));
+    }
+    if (!readOnly) {
+      const toQueue = item.stage === "backlog";
+      const button = el("button", "small-button request-move", toQueue ? "Move to Queued" : "Move to Backlog");
       button.type = "button";
-      button.dataset.control = "start";
-      button.setAttribute("aria-label", button.textContent + " request: " + item.title);
-      button.disabled = working || missing.length > 0;
-      button.onclick = () => void startCard(item);
+      button.dataset.control = "move";
+      button.setAttribute("aria-label", button.textContent + ": " + item.title);
+      button.disabled = working;
+      button.onclick = () => void move(item.id, toQueue ? "queued" : "backlog");
       card.append(button);
-      if (missing.length) card.append(el("p", "request-hint", "Edit this request to select " + missing.join(" and ") + "."));
     }
     if (errors.has(item.id)) {
       const problem = el("p", "board-error", errors.get(item.id));

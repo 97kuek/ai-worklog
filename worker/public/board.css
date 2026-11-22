@@ -74,7 +74,8 @@
   margin-top: 4px;
   line-height: 1.4;
 }
-.is-dragging .board-completed {
+.is-dragging .board-completed,
+.board-lane.drop-target {
   outline: 2px dashed var(--accent);
   outline-offset: 3px;
   background: var(--paper);
@@ -124,7 +125,7 @@
 }
 
 .request-card-content { padding: 14px 16px; }
-.request-start {
+.request-move {
   min-height: 44px;
   margin: 0 16px 12px;
   color: var(--accent);
@@ -138,3 +139,15 @@
 .request-status { color: var(--ink); font-weight: 600; }
 .request-hint { color: var(--muted); }
 .board-launched:not(:empty) + .board-list:not(:empty) { margin-top: 6px; }
+
+@media (hover: hover) and (pointer: fine) {
+  @container (min-width: 841px) {
+    .request-move:not(:focus-visible) {
+      position: absolute;
+      clip-path: inset(50%);
+      pointer-events: none;
+    }
+    .request-card[draggable="true"] .request-card-button { cursor: grab; }
+    .request-card[draggable="true"] .request-card-button:active { cursor: grabbing; }
+  }
+}

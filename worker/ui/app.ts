@@ -1,4 +1,4 @@
-import { launchConflictMessages, type Launch } from "./launch.js";
+import { requestErrorMessages } from "./launch.js";
 import type { BoardRequest } from "./planning.js";
 import {
   addDays,
@@ -92,9 +92,10 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   });
   if (res.status === 401 || res.status === 403 || res.redirected)
     throw new Error("Sign in and reload this page.");
-  if (res.status === 409) {
+  if (res.status === 400 || res.status === 409) {
     const body = await res.json().catch(() => null) as { error?: string } | null;
-    throw new Error(launchConflictMessages[body?.error ?? ""] ?? "This task has changed. Reopen it to see the latest version.");
+    throw new Error(requestErrorMessages[body?.error ?? ""] ?? (res.status === 409
+      ? "This task has changed. Reopen it to see the latest version." : "The server could not accept this request."));
   }
   if (res.status === 404) throw new Error("Task not found.");
   if (!res.ok) throw new Error("Could not load records from the server.");
@@ -258,15 +259,7 @@ async function load(done = "") {
       refreshBoard = renderBoard(root, data.sessions, showDetail, complete, data.requests ?? [], (id, change) =>
         api("/api/board/requests/" + encodeURIComponent(id), {
           method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(change),
-        }), async (id, attempt_id) => {
-          try {
-            return await api<{ launch: Launch }>("/api/board/requests/" + encodeURIComponent(id) + "/start", {
-              method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ attempt_id }),
-            });
-          } catch (e) {
-            throw new Error(message(e));
-          }
-        }, data.runnerProjects ?? []);
+        }), data.runnerProjects ?? []);
     } else {
       const q = new URLSearchParams({ from: start.toISOString(), to: end.toISOString() });
       const data = await api<WeekData>("/api/blocks?" + q, { signal: controller.signal });
