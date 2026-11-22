@@ -3,8 +3,18 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+/// 名付けの結果
+#[derive(Clone, Debug, PartialEq)]
+pub enum NameOutcome {
+    Named(String),
+    /// claude は答えたが、作業名として使えない出力だった
+    Unusable,
+    /// claude を動かせなかった（見つからない、異常終了、時間切れ）
+    Unavailable,
+}
+
 pub trait Namer {
-    fn name(&self, material: &str) -> Option<String>;
+    fn name(&self, material: &str) -> NameOutcome;
 }
 
 pub struct ClaudeCliNamer {
@@ -15,7 +25,17 @@ pub struct ClaudeCliNamer {
 }
 
 impl Namer for ClaudeCliNamer {
-    fn name(&self, material: &str) -> Option<String> {
+    fn name(&self, material: &str) -> NameOutcome {
+        match self.run(material) {
+            None => NameOutcome::Unavailable,
+            Some(out) => sanitize_title(&out).map_or(NameOutcome::Unusable, NameOutcome::Named),
+        }
+    }
+}
+
+impl ClaudeCliNamer {
+    /// claude を動かして標準出力を返す。動かせない・異常終了・時間切れなら None
+    fn run(&self, material: &str) -> Option<String> {
         std::fs::create_dir_all(&self.cwd).ok()?;
         let mut child = Command::new(&self.command)
             .args(["-p", "--model", &self.model, "--no-session-persistence", "--tools", ""])
@@ -58,7 +78,7 @@ impl Namer for ClaudeCliNamer {
         if !status.success() {
             return None;
         }
-        sanitize_title(&String::from_utf8_lossy(&out))
+        Some(String::from_utf8_lossy(&out).into_owned())
     }
 }
 
@@ -158,7 +178,7 @@ mod tests {
     }
 
     #[test]
-    fn cli_namer_returns_none_when_command_is_missing_or_slow() {
+    fn cli_namer_tells_unavailable_from_unusable() {
         let dir = std::env::temp_dir().join(format!("ai-worklog-namer-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mk = |command: String, timeout_ms| ClaudeCliNamer {
@@ -167,15 +187,17 @@ mod tests {
             cwd: dir.join("work"),
             timeout: Duration::from_millis(timeout_ms),
         };
-        assert_eq!(mk("/nonexistent/claude".into(), 200).name("m"), None);
+        assert_eq!(mk("/nonexistent/claude".into(), 200).name("m"), NameOutcome::Unavailable);
         let slow = script(&dir, "slow.sh", "sleep 5");
         let t = Instant::now();
-        assert_eq!(mk(slow, 200).name("m"), None);
+        assert_eq!(mk(slow, 200).name("m"), NameOutcome::Unavailable);
         assert!(t.elapsed() < Duration::from_secs(2));
         let ok = script(&dir, "ok.sh", "cat >/dev/null\nprintf '認証の実装'");
-        assert_eq!(mk(ok, 2000).name("m").as_deref(), Some("認証の実装"));
+        assert_eq!(mk(ok, 2000).name("m"), NameOutcome::Named("認証の実装".into()));
         let fail = script(&dir, "fail.sh", "cat >/dev/null\nprintf 'x'\nexit 1");
-        assert_eq!(mk(fail, 2000).name("m"), None);
+        assert_eq!(mk(fail, 2000).name("m"), NameOutcome::Unavailable);
+        let unusable = script(&dir, "unusable.sh", "cat >/dev/null\nprintf '一\\n二\\n'");
+        assert_eq!(mk(unusable, 2000).name("m"), NameOutcome::Unusable);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
