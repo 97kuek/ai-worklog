@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { ConfigError, type Authenticate } from "./auth/identity";
 import { ensureMachine, ensureUser } from "./db/repo";
+import { registerRunnerRoutes } from "./routes/runner";
 import { registerRequestRoutes } from "./routes/requests";
 import { registerBlockRoutes } from "./routes/blocks";
 import { registerSessionRoutes } from "./routes/sessions";
@@ -46,6 +47,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
 
   registerSessionRoutes(app, now);
   registerRequestRoutes(app, now);
+  registerRunnerRoutes(app, now);
   registerBlockRoutes(app);
   registerSkillRoutes(app);
 
