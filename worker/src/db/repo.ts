@@ -193,9 +193,12 @@ export type BlockRow = {
   cache_write_tokens: number;
 };
 
+// Completion belongs to the observed turn. A later observation can reopen the
+// same native session, including rows completed before this rule was introduced.
+const currentCompletion = "CASE WHEN s.observed_at IS NULL OR s.observed_at <= s.completed_at THEN s.completed_at END";
 const SELECT_SESSION = `SELECT s.id, s.tool, s.title, s.manual_title, s.project, s.git_branch, s.models, s.model_efforts, s.invoked_by,
     m.name AS machine_name, s.started_at, s.ended_at, s.active_minutes,
-    s.observed_state, s.observed_at, s.completed_at,
+    s.observed_state, s.observed_at, ${currentCompletion} AS completed_at,
     s.input_tokens, s.output_tokens, s.cache_read_tokens, s.cache_write_tokens
   FROM sessions s JOIN machines m ON m.id = s.machine_id AND m.user_id = s.user_id`;
 
@@ -207,7 +210,7 @@ function sessionById(db: D1Database, userId: string, id: string) {
 }
 
 export async function listBoardSessions(db: D1Database, userId: string, status?: "running"): Promise<SessionRow[]> {
-  const filter = status === "running" ? "AND s.observed_state = 'running' AND (s.completed_at IS NULL OR s.observed_at > s.completed_at)" : "";
+  const filter = status === "running" ? `AND s.observed_state = 'running' AND (${currentCompletion}) IS NULL` : "";
   const sessions = await db.prepare(`${SELECT_SESSION} WHERE s.user_id = ? ${filter} ORDER BY s.ended_at DESC, s.id`)
     .bind(userId).all<SessionRow>();
   return sessions.results;
@@ -218,8 +221,8 @@ export type BoardSessionRow = Pick<SessionRow, "id" | "tool" | "title" | "manual
 
 export async function listVisibleBoardSessions(db: D1Database, user: string, cutoff: number) {
   const { results } = await db.prepare(`SELECT id, tool, title, manual_title, observed_state, observed_at,
-    completed_at, started_at, ended_at FROM sessions WHERE user_id = ?
-    AND (completed_at > ? OR (completed_at IS NULL AND observed_state IN ('running', 'waiting')))`)
+    ${currentCompletion} AS completed_at, started_at, ended_at FROM sessions s WHERE user_id = ?
+    AND ((${currentCompletion}) > ? OR ((${currentCompletion}) IS NULL AND observed_state IN ('running', 'waiting')))`)
     .bind(user, cutoff).all<BoardSessionRow>();
   return results;
 }
@@ -252,8 +255,8 @@ export async function setManualTitle(
 export async function completeSession(db: D1Database, userId: string, id: string, now: number) {
   // The condition and the returned row share a transaction with respect to racing uploads/retries.
   const [, session] = await db.batch<SessionRow>([
-    db.prepare(`UPDATE sessions SET completed_at = ?, updated_at = MAX(updated_at, ?)
-      WHERE user_id = ? AND id = ? AND observed_state = 'waiting' AND completed_at IS NULL`)
+    db.prepare(`UPDATE sessions AS s SET completed_at = MAX(?, observed_at), updated_at = MAX(updated_at, ?)
+      WHERE user_id = ? AND id = ? AND observed_state = 'waiting' AND (${currentCompletion}) IS NULL`)
       .bind(now, now, userId, id),
     sessionById(db, userId, id),
   ]);
