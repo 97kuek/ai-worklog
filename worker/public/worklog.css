@@ -717,10 +717,17 @@ main:focus {
   flex: 1;
   min-width: 0;
   display: flex;
-  align-items: flex-start;
-  gap: 8px;
+  align-items: center;
+  gap: 6px;
 }
-.edit-title { flex: none; }
+#detail-heading h2 { margin: 0; }
+#detail-heading .edit-title {
+  flex: none;
+  margin-inline-start: auto;
+  background: transparent;
+  border: 0;
+}
+.edit-title img { width: 16px; height: 16px; opacity: .72; }
 .title-editor { width: 100%; }
 .title-editor label { display: block; color: var(--muted); }
 .title-editor input {
@@ -730,8 +737,16 @@ main:focus {
   border: 1px solid var(--line-strong);
   border-radius: 5px;
 }
-.title-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
-.title-actions button { min-height: 36px; }
-.title-actions button:last-child:not(:nth-child(2)) { margin-inline-start: auto; }
+.title-input-line {
+  display: flex;
+  align-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  margin-top: 4px;
+}
+.title-input-line input { flex: 1; min-width: 0; border: 0; margin: 0; background: transparent; }
+.title-apply { display: grid; place-items: center; width: 44px; height: 44px; flex: none; color: var(--ink); }
+.title-apply img { display: block; }
+.restore-title { color: var(--muted); padding: 4px 0; margin-top: 4px; }
 .title-editor .title-error { margin: 6px 0 0; color: var(--ink); font-weight: 600; }
 .title-error:empty { display: none; }

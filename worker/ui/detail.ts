@@ -1,5 +1,5 @@
 import { duration } from "./activity.js";
-import { blockTimeRange, countLabel, el, engineName, fullDate, modelLabels, statusText, type Block, type Session } from "./shared.js";
+import { blockTimeRange, countLabel, el, engineName, fullDate, modelSettings, type Block, type Session } from "./shared.js";
 
 const tokenFields = [
   ["input", "Input"], ["output", "Output"], ["cache_read", "Cache read"], ["cache_write", "Cache write"],
@@ -70,18 +70,28 @@ function fact(list: HTMLElement, label: string, value: string) {
 }
 
 export function renderDetail(root: HTMLElement, session: Session, blocks: Block[], selected?: Block) {
-  const summary = el("div", "detail-byline");
-  summary.append(statusText(session), el("span", "engine", engineName(session.tool)));
   const facts = el("dl", "facts detail-facts");
   const { project, git_branch } = session;
   if (project || git_branch) {
     fact(facts, project ? "Project" : "Branch", [project, git_branch].filter(Boolean).join(" / "));
   }
-  const models = modelLabels(session);
-  if (models.length) fact(facts, "Models", models.join(", "));
-
-  root.replaceChildren(summary);
-  if (facts.childElementCount) root.append(facts);
+  const settings = el("table", "detail-settings");
+  settings.setAttribute("aria-label", "Execution settings");
+  const heading = settings.createTHead().insertRow();
+  for (const label of ["Engine", "Model", "Effort"]) {
+    const th = el("th", "", label);
+    th.scope = "col";
+    heading.append(th);
+  }
+  const pairs = modelSettings(session);
+  const rows = settings.createTBody();
+  for (const pair of pairs.length ? pairs : [{ model: "", effort: null }]) {
+    const row = rows.insertRow();
+    row.insertCell().textContent = engineName(session.tool);
+    row.insertCell().textContent = pair.model || "—";
+    row.insertCell().textContent = pair.effort ?? "—";
+  }
+  root.replaceChildren(facts, settings);
   root.append(tokenUsage(session), blockHistory(session, blocks, selected));
 
   const recorded = el("dl", "facts detail-facts");
