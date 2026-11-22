@@ -1,0 +1,22 @@
+name: Check CLI
+
+on:
+  pull_request:
+    paths:
+      - 'cli/**'
+      - 'contract/**'
+      - 'scripts/install-*.py'
+      - '.github/workflows/check-cli.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  cli:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: cargo +stable test --locked --manifest-path cli/Cargo.toml
