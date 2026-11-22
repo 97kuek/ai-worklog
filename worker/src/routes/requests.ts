@@ -12,8 +12,8 @@ function queueValidation(user: string, stage: string, settings?: [string | null,
   const choice = settings ? "SELECT ?,?" : "SELECT board_requests.project,board_requests.engine";
   return {
     sql: `(WITH choice(project,engine) AS (${choice}), registered AS (
-      SELECT b.engines FROM board_runners b JOIN machines m ON m.id=b.machine_id, choice
-      WHERE m.user_id=? AND choice.project IN (SELECT value FROM json_each(b.projects))
+      SELECT p.engines FROM runner_projects p JOIN machines m ON m.id=p.machine_id, choice
+      WHERE m.user_id=? AND p.enabled=1 AND p.project=choice.project
     ) SELECT CASE
       WHEN choice.project IS NULL THEN 'project_required'
       WHEN choice.engine IS NULL THEN 'engine_required'

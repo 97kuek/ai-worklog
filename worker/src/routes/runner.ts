@@ -29,8 +29,10 @@ export function registerRunnerRoutes(app: Hono<AppEnv>, now: () => number) {
     const principal = c.get("principal");
     if (principal.kind !== "machine") return c.json({ error: "forbidden" }, 403);
     const body = await c.req.json().catch(() => null);
-    if (!validProjects(body?.projects) || !validEngines(body?.engines) || (body.auto_queue !== undefined && typeof body.auto_queue !== "boolean")) return c.json({ error: "invalid_payload" }, 400);
-    const job = await claimLaunch(c.env.DB, principal.userId, principal.machineId, body.projects, body.engines, body.auto_queue === true, now());
+    if (!validProjects(body?.projects) || !validEngines(body?.engines)
+      || (body.machine_name !== undefined && (typeof body.machine_name !== "string" || !body.machine_name.trim() || body.machine_name.length > 100))
+      || (body.auto_queue !== undefined && typeof body.auto_queue !== "boolean")) return c.json({ error: "invalid_payload" }, 400);
+    const job = await claimLaunch(c.env.DB, principal.userId, principal.machineId, body.projects, body.engines, body.auto_queue === true, now(), body.machine_name?.trim());
     return c.json({ job }, 200, { "Cache-Control": "private, no-store" });
   });
 
