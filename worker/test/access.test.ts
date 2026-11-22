@@ -71,6 +71,14 @@ describe("createAccessAuthenticator", () => {
     expect(await auth(req(token), env)).toBeNull();
   });
 
+  it("accepts_a_token_issued_slightly_in_the_future", async () => {
+    const kp = await makeKeyPair("k1");
+    const auth = createAccessAuthenticator(async () => [kp.publicJwk]);
+    const now = Math.floor(Date.now() / 1000);
+    const token = await kp.sign(accessClaims({ common_name: "abc.access", iat: now + 120 }));
+    expect(await auth(req(token), env)).toEqual({ kind: "machine", clientId: "abc.access" });
+  });
+
   it("rejects_bad_signature", async () => {
     const good = await makeKeyPair("k1");
     const other = await makeKeyPair("k1");

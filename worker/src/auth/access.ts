@@ -35,7 +35,7 @@ export function createAccessAuthenticator(
       payload = (await Jwt.verifyWithJwks(token, {
         keys,
         allowedAlgorithms: ["RS256"],
-        verification: { iss: `https://${teamDomain}`, aud },
+        verification: { iss: `https://${teamDomain}`, aud, iat: false },
       })) as Record<string, unknown>;
     } catch {
       return null;
