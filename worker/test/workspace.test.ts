@@ -44,7 +44,10 @@ async function setup() {
     expect(response.status).toBe(200);
     return response.json<{ sessions: Session[] }>();
   }
-  return { request, upload, board, post, user, machine, tick: () => { now += 1; } };
+  const register = (project: string) => request("/api/runner/claim", machine, {
+    method: "PUT", body: JSON.stringify({ projects: [project], engines: ["codex"] }),
+  });
+  return { request, upload, board, post, user, machine, register, tick: () => { now += 1; } };
 }
 
 it("lists historical, unknown and unobserved sessions and reads every block of a session", async () => {
@@ -250,7 +253,8 @@ it("validates manual names and permits only a same-origin request from the ownin
 });
 
 it("persists owner planning requests, retries additions and moves without starting a session", async () => {
-  const { request, user, machine } = await setup();
+  const { request, user, machine, register } = await setup();
+  await register("demo");
   const id = crypto.randomUUID();
   const path = "/api/board/requests/" + id;
   const change = (body: object, token = user, origin = ORIGIN) => request(path, token, {
@@ -273,14 +277,15 @@ it("persists owner planning requests, retries additions and moves without starti
   expect((await change({ stage: "queued" })).status).toBe(200);
   expect((await change({ title: "Plan", ...metadata })).status).toBe(200);
   expect((await change({ stage: "queued" })).status).toBe(200);
-  expect(await (await request("/api/board")).json()).toEqual({ sessions: [], requests: [{ id, title: "Plan", ...metadata, stage: "queued" }] });
+  expect(await (await request("/api/board")).json()).toEqual({ sessions: [], runnerProjects: ["demo"], requests: [{ id, title: "Plan", ...metadata, stage: "queued" }] });
   expect(await (await request("/api/board?status=running")).json()).toEqual({ sessions: [] });
   expect((await change({ stage: "backlog" })).status).toBe(200);
-  expect(await (await request("/api/board")).json()).toEqual({ sessions: [], requests: [{ id, title: "Plan", ...metadata, stage: "backlog" }] });
+  expect(await (await request("/api/board")).json()).toEqual({ sessions: [], runnerProjects: ["demo"], requests: [{ id, title: "Plan", ...metadata, stage: "backlog" }] });
 });
 
 it("saves planning edits and lane changes atomically, including retries and stale editors", async () => {
-  const { request } = await setup();
+  const { request, register } = await setup();
+  await register("api");
   const id = crypto.randomUUID();
   const put = (body: object) => request("/api/board/requests/" + id, undefined, {
     method: "PUT", headers: { Origin: ORIGIN, "Content-Type": "application/json" }, body: JSON.stringify(body),
