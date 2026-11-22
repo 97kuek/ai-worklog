@@ -255,7 +255,20 @@ pub fn poll(home: &Path) -> Result<()> {
                 &path,
                 &Journal::Report(Report::failed(&job.attempt_id, "runner_interrupted")),
             )?;
-            execute(cmd, &job.title)
+            let (done, stopped) = std::sync::mpsc::channel::<()>();
+            std::thread::scope(|scope| {
+                let sender = &sender;
+                let running = &running;
+                scope.spawn(move || {
+                    while stopped.recv_timeout(Duration::from_secs(30)) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+                        // A failed check-in never restarts a running provider. The terminal report is journaled below.
+                        let _ = report(sender, running);
+                    }
+                });
+                let outcome = execute(cmd, &job.title);
+                drop(done);
+                outcome
+            })
         }
     };
     let result = match outcome {

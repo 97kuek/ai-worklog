@@ -356,6 +356,47 @@ it("lists collectors and legacy runners, and waits for the target Mac's next aut
   expect(await (await s.call(path, s.user, "POST", {})).json()).toEqual({ requested_at: refreshed + 120_005 });
 });
 
+it("keeps a busy Mac online and acknowledges connection tests only for its active attempt", async () => {
+  const s = await setup();
+  await s.queue();
+  const attempt = crypto.randomUUID();
+  await s.start(attempt);
+  await s.claim();
+  const startedAt = 1_800_000_000_000;
+  expect((await s.result(attempt, "running")).status).toBe(200);
+  await s.claim(s.otherMac);
+  const macIds = await Promise.all([s.mac, s.otherMac].map(async token =>
+    (await (await s.call("/api/me", token, "GET")).json<{machine_id: string}>()).machine_id));
+  const [id, otherId] = macIds;
+  const testPath = (machine: string) => "/api/settings/machines/" + machine + "/test";
+  const list = async () => (await (await s.call("/api/settings", s.user, "GET"))
+    .json<{machines: {id: string; online: boolean}[]}>()).machines;
+
+  s.tick(120_000);
+  for (const machine of macIds) await s.call(testPath(machine), s.user, "POST", {});
+  s.tick(30_000);
+  expect((await s.result(attempt, "running", s.otherMac)).status).toBe(404);
+  expect((await s.result(attempt, "running")).status).toBe(200);
+  const machines = await list();
+  expect(machines.find(m => m.id === id)).toMatchObject({
+    online: true, seen_at: startedAt + 150_000, connection_test: { acknowledged_at: startedAt + 150_000 },
+    projects: [{ key: "demo", enabled: true }], engines: ["codex"],
+  });
+  expect(machines.find(m => m.id === otherId)).toMatchObject({
+    online: false, seen_at: startedAt, connection_test: { acknowledged_at: null },
+  });
+  expect(await env.DB.prepare("SELECT state_since FROM board_launches WHERE attempt_id=?")
+    .bind(attempt).first("state_since")).toBe(startedAt);
+
+  expect((await s.result(attempt, "completed")).status).toBe(200);
+  s.tick(120_000);
+  await s.call(testPath(id), s.user, "POST", {});
+  expect((await s.result(attempt, "running")).status).toBe(409);
+  expect((await list()).find(m => m.id === id)).toMatchObject({
+    online: false, seen_at: startedAt + 150_000, connection_test: { acknowledged_at: null },
+  });
+});
+
 it("restricts machine settings to their owner, current local keys, and same-origin changes", async () => {
   const s = await setup();
   await s.claim();
