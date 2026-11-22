@@ -200,8 +200,12 @@ pub fn collect_and_save(opts: &CollectOptions, save: &SaveOptions, sender: &dyn 
 
 /// ~/.taskfolio/collect.lock を try_lock する。取れなければ None
 pub fn acquire_lock(home: &Path) -> io::Result<Option<File>> {
+    acquire_named_lock(home, "collect.lock")
+}
+
+pub(super) fn acquire_named_lock(home: &Path, name: &str) -> io::Result<Option<File>> {
     create_private_dir(home)?;
-    let file = OpenOptions::new().create(true).truncate(false).write(true).mode(0o600).open(home.join("collect.lock"))?;
+    let file = OpenOptions::new().create(true).truncate(false).write(true).mode(0o600).open(home.join(name))?;
     match file.try_lock() {
         Ok(()) => Ok(Some(file)),
         Err(TryLockError::WouldBlock) => Ok(None),
