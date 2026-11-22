@@ -48,7 +48,6 @@ export class OfficeScene {
   private room = 0;
   private timer = 0;
   private lastShadow = 0;
-  private seats: (string | undefined)[] = [];
   private pressed?: {x: number; y: number; dragged: boolean};
   private onscreen = false;
   private disposed = false;
@@ -186,27 +185,28 @@ export class OfficeScene {
       this.furniture.add(group, person.root, person.cup);
       this.desks.push({group, person});
     }
-    this.setSeats(this.seats, this.room);
     this.renderer.shadowMap.needsUpdate = true;
     this.invalidate();
   }
 
-  setSeats(ids: (string | undefined)[], room: number) {
-    const changedRoom = this.room !== room;
-    this.seats = ids;
+  setSeats(ids: (string | undefined)[], room: number, settle = false) {
+    const snapshot = settle || this.room !== room;
+    const immediate = snapshot || !this.onscreen || this.reducedMotion.matches;
+    let changed = false;
     this.room = room;
     for (const [i, desk] of this.desks.entries()) {
       const id = ids[i];
-      if (!changedRoom && id === desk.id) continue;
+      if (!snapshot && id === desk.id) continue;
+      changed = true;
       desk.id = id;
       desk.group.userData.taskId = id;
       desk.person.root.userData.taskId = id;
-      if (changedRoom || this.reducedMotion.matches) {
+      if (immediate) {
         desk.person.pose(0, i * 2.1, !!id, this.reducedMotion.matches, true);
         this.renderer.shadowMap.needsUpdate = true;
       }
     }
-    this.select();
+    if (changed) this.select();
   }
 
   private hit(event: PointerEvent) {

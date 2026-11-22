@@ -55,7 +55,7 @@ The layout reference is [DESIGN.md](DESIGN.md). Taskfolio uses white surfaces, i
 
 - **Skills** lists the tool, name, and description reported by Claude Code and Codex. Matching names and descriptions appear once with both tools. The collector queries both tools from the user’s home directory by default. Set `skills_cwd` in the CLI configuration to include skills available in a specific project.
 
-- **Office** has three employees per room. They drink coffee, tea, or a latte at the café, walk to their desks when a task starts, and return to their drinks when it ends. Additional rooms open as needed. Select a working employee or a task in the list to open its details. The office checks for status changes every 15 seconds while visible. The editable Blender scene is [Taskfolio.blend](design/office/Taskfolio.blend).
+- **Office** has three employees per room. When you open Office, employees with running tasks are already typing. As new tasks arrive, an employee chosen at random from the café walks to a desk and returns when the task ends. The same task keeps its employee across reloads in that tab. Additional rooms open as needed. Select a working employee or a task in the list to open its details. The office checks for status changes every 15 seconds while visible. The editable Blender scene is [Taskfolio.blend](design/office/Taskfolio.blend).
 
 The 3D scene uses natural materials, including oak desks, felt dividers, and an upholstered reading chair. The three-color web palette applies to the surrounding interface.
 
