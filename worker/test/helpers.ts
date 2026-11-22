@@ -1,5 +1,8 @@
 import type { HonoJsonWebKey } from "hono/utils/jwt/jws";
 import { Jwt } from "hono/utils/jwt";
+import type { Hono } from "hono";
+import { type AppEnv, createApp } from "../src/app";
+import { createAccessAuthenticator } from "../src/auth/access";
 
 export async function makeKeyPair(kid: string): Promise<{
   publicJwk: HonoJsonWebKey;
@@ -40,5 +43,22 @@ export function accessClaims(extra: Record<string, unknown>): Record<string, unk
     iat: now,
     exp: now + 3600,
     ...extra,
+  };
+}
+
+export async function testApp(opts: { now?: () => number } = {}): Promise<{
+  app: Hono<AppEnv>;
+  userToken(email?: string): Promise<string>;
+  machineToken(clientId?: string): Promise<string>;
+}> {
+  const { publicJwk, sign } = await makeKeyPair("test-kid");
+  const app = createApp({
+    authenticate: createAccessAuthenticator(async () => [publicJwk]),
+    now: opts.now,
+  });
+  return {
+    app,
+    userToken: (email = "owner@example.com") => sign(accessClaims({ email })),
+    machineToken: (clientId = "test-machine.access") => sign(accessClaims({ common_name: clientId })),
   };
 }
