@@ -136,7 +136,7 @@ fn retries_only_delivery_after_provider_exit() {
         calls[0],
         (
             "/api/runner/claim".into(),
-            json!({"engines":["claude_code","codex"],"projects":["demo"],"auto_queue":true})
+            json!({"engines":["claude_code","codex"],"projects":["demo"],"auto_queue":true,"machine_name":"fixture"})
         )
     );
     assert_eq!(calls[1].1["state"], "running");
@@ -276,5 +276,149 @@ fn overlapping_polls_and_crash_recovery_do_not_start_a_second_provider() {
         "start\n"
     );
     assert!(!dir.join("runner-journal.json").exists());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn heartbeats_with_only_the_available_projects_and_engines() {
+    let dir = home("inventory");
+    let settings = dir.join("runner.json");
+    let mut cfg: Value = serde_json::from_slice(&fs::read(&settings).unwrap()).unwrap();
+    cfg["projects"]["moved"] = json!(dir.join("missing"));
+    cfg["executables"]["codex"] = json!(dir.join("config.json"));
+    cfg["future"] = json!({"retain":true});
+    fs::write(&settings, cfg.to_string()).unwrap();
+    let api = serve(&dir, vec![(200, json!({"job":null}))]);
+    assert!(run(&dir).status.success());
+    let calls = api.join().unwrap();
+    assert_eq!(
+        calls[0].1,
+        json!({"projects":["demo"], "engines":["claude_code"], "machine_name":"fixture", "auto_queue":true})
+    );
+
+    fs::remove_file(&settings).unwrap();
+    let api = serve(&dir, vec![(200, json!({"job":null}))]);
+    let out = Command::new(env!("CARGO_BIN_EXE_taskfolio"))
+        .arg("runner")
+        .env("TASKFOLIO_HOME", &dir)
+        .env("PATH", &dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        api.join().unwrap()[0].1,
+        json!({"projects":[], "engines":[], "machine_name":"fixture", "auto_queue":true})
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn registers_folders_without_replacing_existing_mappings_or_settings() {
+    let dir = home("folders");
+    let folder = dir.join("new folder");
+    fs::create_dir(&folder).unwrap();
+    let path = dir.join("runner.json");
+    let mut before: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    before["codex_sandbox"] = "workspace-write".into();
+    before["future_setting"] = json!({"keep":["fields"]});
+    fs::write(&path, before.to_string()).unwrap();
+    let register = |name: Option<&str>, selected: &Path| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_taskfolio"));
+        cmd.args(["folder", "add", "--path"])
+            .arg(selected)
+            .env("TASKFOLIO_HOME", &dir);
+        if let Some(name) = name {
+            cmd.args(["--name", name]);
+        }
+        cmd.output().unwrap()
+    };
+    assert!(register(Some("client"), &folder).status.success());
+    let saved = fs::read(&path).unwrap();
+    before["projects"]["client"] = json!(folder.canonicalize().unwrap());
+    assert_eq!(serde_json::from_slice::<Value>(&saved).unwrap(), before);
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert!(register(None, &folder).status.success());
+    assert!(!register(Some("demo"), &folder).status.success());
+    assert_eq!(fs::read(&path).unwrap(), saved);
+    fs::write(&path, b"{bad json").unwrap();
+    assert!(!register(None, &folder).status.success());
+    assert_eq!(fs::read(&path).unwrap(), b"{bad json");
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn concurrently_registers_new_folders_and_detects_installed_engines() {
+    let dir = home("concurrent-folders");
+    fs::remove_file(dir.join("runner.json")).unwrap();
+    let tools = dir.join("tools");
+    fs::create_dir(&tools).unwrap();
+    for engine in ["claude", "codex"] {
+        std::os::unix::fs::symlink(dir.join("executable"), tools.join(engine)).unwrap();
+    }
+    let mut children = Vec::new();
+    for name in ["first", "second", "third", "fourth"] {
+        let folder = dir.join(name);
+        fs::create_dir(&folder).unwrap();
+        children.push(
+            Command::new(env!("CARGO_BIN_EXE_taskfolio"))
+                .args(["folder", "add", "--path"])
+                .arg(folder)
+                .env("TASKFOLIO_HOME", &dir)
+                .env("PATH", &tools)
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+    }
+    for mut child in children {
+        assert!(child.wait().unwrap().success());
+    }
+    let saved: Value = serde_json::from_slice(&fs::read(dir.join("runner.json")).unwrap()).unwrap();
+    assert_eq!(
+        saved["executables"],
+        json!({"claude_code":tools.join("claude"), "codex": tools.join("codex")})
+    );
+    for name in ["first", "second", "third", "fourth"] {
+        assert_eq!(
+            saved["projects"][name],
+            json!(dir.join(name).canonicalize().unwrap())
+        );
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn autodetected_engines_keep_their_paths_and_include_tools_installed_later() {
+    let dir = home("late-engine");
+    fs::remove_file(dir.join("runner.json")).unwrap();
+    let shell_bin = dir.join("shell-tools");
+    let runner_bin = dir.join("runner-tools");
+    fs::create_dir(&shell_bin).unwrap();
+    fs::create_dir(&runner_bin).unwrap();
+    std::os::unix::fs::symlink(dir.join("executable"), shell_bin.join("codex")).unwrap();
+    let register = Command::new(env!("CARGO_BIN_EXE_taskfolio"))
+        .args(["folder", "add", "--path"])
+        .arg(dir.join("mapped project"))
+        .env("TASKFOLIO_HOME", &dir)
+        .env("PATH", &shell_bin)
+        .output()
+        .unwrap();
+    assert!(register.status.success());
+    std::os::unix::fs::symlink(dir.join("executable"), runner_bin.join("claude")).unwrap();
+    let api = serve(&dir, vec![(200, json!({"job":null}))]);
+    let out = Command::new(env!("CARGO_BIN_EXE_taskfolio"))
+        .arg("runner")
+        .env("TASKFOLIO_HOME", &dir)
+        .env("PATH", &runner_bin)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        api.join().unwrap()[0].1["engines"],
+        json!(["claude_code", "codex"])
+    );
     fs::remove_dir_all(dir).unwrap();
 }

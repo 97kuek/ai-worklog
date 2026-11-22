@@ -1,72 +1,17 @@
 //! Poll once, finish one initial turn and report its exit status.
-use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use super::collect::acquire_named_lock;
+use super::runner_settings::{Sandbox, Settings};
 use crate::adapters::http::{HttpSender, SendError};
 use crate::adapters::{config, fsutil, keychain};
 use serde::{Deserialize, Serialize};
 
 type Result<T> = std::result::Result<T, &'static str>;
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Settings {
-    projects: BTreeMap<String, PathBuf>,
-    executables: BTreeMap<String, PathBuf>,
-    #[serde(default)]
-    codex_sandbox: Sandbox,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-enum Sandbox {
-    #[default]
-    ReadOnly,
-    WorkspaceWrite,
-}
-
-impl Settings {
-    fn load(home: &Path) -> Result<Self> {
-        let bytes =
-            fs::read(home.join("runner.json")).map_err(|_| "runner.json を読み込めません")?;
-        let settings: Self =
-            serde_json::from_slice(&bytes).map_err(|_| "runner.json の形式が正しくありません")?;
-        if settings.projects.is_empty()
-            || settings.projects.len() > 1024
-            || settings.projects.iter().any(|(name, dir)| {
-                name.trim().is_empty()
-                    || name.trim() != name
-                    || name.encode_utf16().count() > 256
-                    || name.chars().any(char::is_control)
-                    || !dir.is_absolute()
-                    || !dir.is_dir()
-            })
-        {
-            return Err(
-                "runner.json の projects にプロジェクト名と実在する絶対ディレクトリを指定してください",
-            );
-        }
-        if settings.executables.is_empty()
-            || settings.executables.iter().any(|(engine, path)| {
-                !matches!(engine.as_str(), "codex" | "claude_code")
-                    || !path.is_absolute()
-                    || !fs::metadata(path)
-                        .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-            })
-        {
-            return Err(
-                "runner.json の executables に codex または claude_code の実行可能な絶対パスを指定してください",
-            );
-        }
-        Ok(settings)
-    }
-}
 
 #[derive(Clone, Deserialize, Serialize)]
 struct Job {
@@ -118,9 +63,7 @@ fn checkpoint(path: &Path, entry: &Journal) -> Result<()> {
         .map_err(|_| "ジャーナルを保存できません")
 }
 
-fn sender(home: &Path) -> Result<HttpSender> {
-    let cfg =
-        config::load(&home.join("config.json")).map_err(|_| "config.json を読み込めません")?;
+fn sender(cfg: &config::Config) -> Result<HttpSender> {
     let uri = cfg
         .api_url
         .parse::<ureq::http::Uri>()
@@ -136,12 +79,12 @@ fn sender(home: &Path) -> Result<HttpSender> {
         (Some("https"), false) => {
             let secret = keychain::read_secret(&cfg.client_id)
                 .map_err(|_| "Keychain の Taskfolio 認証情報を読み込めません")?;
-            (cfg.client_id, secret)
+            (cfg.client_id.clone(), secret)
         }
         _ => return Err("リモート API には HTTPS が必要です"),
     };
     Ok(HttpSender {
-        url: cfg.api_url,
+        url: cfg.api_url.clone(),
         client_id,
         client_secret,
         timeout: Duration::from_secs(30),
@@ -197,7 +140,7 @@ fn command(settings: &Settings, job: &Job) -> Result<Command> {
         cmd.args([
             "exec",
             "--sandbox",
-            match settings.codex_sandbox {
+            match settings.codex_sandbox.unwrap_or_default() {
                 Sandbox::ReadOnly => "read-only",
                 Sandbox::WorkspaceWrite => "workspace-write",
             },
@@ -262,16 +205,18 @@ pub fn poll(home: &Path) -> Result<()> {
         Err(_) => return Err("ジャーナルを読み込めません"),
     };
     let clear = || fs::remove_file(&path).map_err(|_| "ジャーナルを削除できません");
+    let cfg =
+        config::load(&home.join("config.json")).map_err(|_| "config.json を読み込めません")?;
+    let sender = sender(&cfg)?;
     let prepared = match previous {
         Some(Journal::Report(saved)) => {
-            report(&sender(home)?, &saved)?;
+            report(&sender, &saved)?;
             return clear();
         }
         Some(Journal::Prepared(job)) => Some(job),
         None => None,
     };
-    let settings = Settings::load(home)?;
-    let sender = sender(home)?;
+    let settings = Settings::available(home)?;
     let job = match prepared {
         Some(job) => job,
         None => {
@@ -279,11 +224,15 @@ pub fn poll(home: &Path) -> Result<()> {
             struct Claim {
                 job: Option<Job>,
             }
-            let body = serde_json::json!({
+            let mut body = serde_json::json!({
                 "projects": settings.projects.keys().collect::<Vec<_>>(),
                 "engines": settings.executables.keys().collect::<Vec<_>>(),
                 "auto_queue": true,
             });
+            let name = cfg.machine_name.trim();
+            if !name.is_empty() && name.encode_utf16().count() <= 100 {
+                body["machine_name"] = name.into();
+            }
             let claim: Claim = sender
                 .put("runner/claim", &body.to_string())
                 .map_err(api_error)?;

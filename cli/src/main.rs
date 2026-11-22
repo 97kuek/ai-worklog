@@ -15,11 +15,12 @@ use taskfolio::app::setup::{self, append_log_line};
 use taskfolio::app::output::{to_json, to_table};
 use taskfolio::app::scan::{scan, ScanOptions};
 
-const USAGE: &str = "usage: taskfolio <scan|skills|collect|runner|login|setup|hook|hook-status|doctor|--version>
+const USAGE: &str = "usage: taskfolio <scan|skills|collect|runner|folder|login|setup|hook|hook-status|doctor|--version>
   scan [--since-days N] [--gap-minutes N] [--format json|table] [--claude-dir PATH] [--codex-dir PATH]
   skills [--cwd PATH]
   collect [--rescan]
   runner
+  folder add [--path DIR] [--name KEY]
   login --url API_URL --machine-name NAME --client-id ID [--expires YYYY-MM-DD]
   setup [--print-only]
   hook
@@ -87,6 +88,13 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Ok(Some(lexopt::Arg::Value(cmd))) if cmd == "folder" => match run_folder(parser) {
+            Ok(code) => code,
+            Err(e) => {
+                eprintln!("taskfolio: {e}");
+                usage_error()
+            }
+        },
         Ok(Some(lexopt::Arg::Value(cmd))) if cmd == "login" => match run_login(parser) {
             Ok(code) => code,
             Err(e) => {
@@ -205,6 +213,41 @@ fn run_collect(rescan: bool) -> ExitCode {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+fn run_folder(mut parser: lexopt::Parser) -> Result<ExitCode, lexopt::Error> {
+    use lexopt::prelude::*;
+    use taskfolio::app::runner_settings::{add_folder, choose_folder};
+    if !matches!(parser.next()?, Some(Value(cmd)) if cmd == "add") {
+        return Err("expected folder add".into());
+    }
+    let (mut path, mut name) = (None, None);
+    while let Some(arg) = parser.next()? {
+        match arg {
+            Long("path") if path.is_none() => path = Some(PathBuf::from(parser.value()?)),
+            Long("name") if name.is_none() => name = Some(parser.value()?.string()?),
+            _ => return Err(arg.unexpected()),
+        }
+    }
+    let selected = match path {
+        Some(path) => Ok(Some(path)),
+        None => choose_folder(),
+    };
+    let registered = selected.and_then(|selected| match selected {
+        Some(path) => add_folder(&config::home_dir(), &path, name.as_deref()).map(Some),
+        None => Ok(None),
+    });
+    match registered {
+        Ok(Some(key)) => {
+            println!("Registered project: {key}");
+            Ok(ExitCode::SUCCESS)
+        }
+        Ok(None) => Ok(ExitCode::SUCCESS),
+        Err(e) => {
+            eprintln!("taskfolio: folder add: {e}");
+            Ok(ExitCode::FAILURE)
+        }
     }
 }
 
