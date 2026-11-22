@@ -50,7 +50,7 @@ The layout reference is [DESIGN.md](DESIGN.md). Taskfolio uses white surfaces, i
 
 - **Work log** shows work blocks for a Sunday–Saturday week. Waiting tasks have a pale purple background. The work location is the final directory name recorded by the collector. Filter by day or latest task status, change the date sort order, or select a task to see its details.
 - **Calendar** displays simultaneous blocks side by side and splits them at local midnight. Status labels and colored edges indicate the latest task status. On smaller screens, select one of the seven days.
-- **Board** shows running, waiting, and completed tasks across all weeks. Check a waiting task or drag it into the completed column to record your completion time.
+- **Board** lets you plan requests in Backlog, move them to Queued, and select **Start** to run a request on a registered Mac. Choose a project and engine on the card first. Open a waiting session or drag it into Completed to mark it complete.
 - **Activity** stacks each project's active time by local hour in Daily and by day in Weekly. Select a weekday to open its hourly chart. Concurrent tasks each contribute their duration. The Projects table shows active time and distinct task counts for every project, including those grouped under Other projects in the chart. Select an hour to filter both Projects and Model usage. Each task counts once per recorded combination of engine, model and effort.
 
 - **Skills** lists the tool, name, and description reported by Claude Code and Codex. Matching names and descriptions appear once with both tools. The collector queries both tools from the user’s home directory by default. Set `skills_cwd` in the CLI configuration to include skills available in a specific project.
@@ -60,6 +60,25 @@ The layout reference is [DESIGN.md](DESIGN.md). Taskfolio uses white surfaces, i
 The 3D scene uses natural materials, including oak desks, felt dividers, and an upholstered reading chair. The three-color web palette applies to the surrounding interface.
 
 The Worker builds the UI from `worker/ui/` during Wrangler development and deployment. Apply pending D1 migrations before deploying the Worker.
+
+## Run a queued request on your Mac
+
+Sign in from the collector on the Mac and install the Claude Code or Codex CLI you plan to use. Create `runner.json` alongside Taskfolio’s `config.json`. Project names must match the Board, and executable and project paths must be absolute paths on that Mac. Include the engines you want to run.
+
+```json
+{
+  "projects": { "taskfolio": "/Users/me/Projects/taskfolio" },
+  "executables": {
+    "codex": "/opt/homebrew/bin/codex",
+    "claude_code": "/Users/me/.local/bin/claude"
+  },
+  "codex_sandbox": "workspace-write"
+}
+```
+
+Build the updated CLI, install it at a stable path, and run `python3 scripts/install-runner.py /absolute/path/to/taskfolio` from this repository. For an installation with a custom Taskfolio home, pass `--state-dir /absolute/path/to/state`. The runner reuses the collector’s Cloudflare login and advertises the configured projects and engines while the Mac is awake and logged in.
+
+From Board on your phone or Mac, move a request to Queued and select **Start**. The project folder and provider executable are resolved on the Mac. The agent receives the request text and the model and effort specified on the card. One runner processes one request at a time. The card reports the result of the agent process. To disable future launches on this Mac, allow the current job to finish, then unload the agent with `launchctl bootout "gui/$(id -u)/dev.taskfolio.runner"` and remove its plist from `~/Library/LaunchAgents`.
 
 ## Session status
 

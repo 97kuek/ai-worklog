@@ -122,3 +122,19 @@
 @media (max-width: 400px) {
   .request-choices { grid-template-columns: 1fr; }
 }
+
+.request-card-content { padding: 14px 16px; }
+.request-start {
+  min-height: 44px;
+  margin: 0 16px 12px;
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.request-status, .request-hint, .request-card > .board-error {
+  margin: 0 16px 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.request-status { color: var(--ink); font-weight: 600; }
+.request-hint { color: var(--muted); }
+.board-launched:not(:empty) + .board-list:not(:empty) { margin-top: 6px; }

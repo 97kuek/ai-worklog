@@ -1,3 +1,4 @@
+import { launchConflictMessages, type Launch } from "./launch.js";
 import type { BoardRequest } from "./planning.js";
 import {
   addDays,
@@ -46,6 +47,35 @@ function scheduleOfficeRefresh() {
   window.clearTimeout(officeTimer);
   if (view === "office" && !document.hidden) officeTimer = window.setTimeout(() => void load(), 15000);
 }
+let refreshBoard: ReturnType<typeof renderBoard> | undefined;
+let boardTimer: number | undefined;
+function scheduleBoardRefresh() {
+  window.clearTimeout(boardTimer);
+  if (view === "board" && refreshBoard && !document.hidden)
+    boardTimer = window.setTimeout(() => void pollBoard(), 5000);
+}
+async function pollBoard() {
+  const refresh = refreshBoard;
+  const signal = request?.signal;
+  if (!refresh || document.hidden) return;
+  try {
+    await refresh(async () => {
+      const data = await api<{ requests: BoardRequest[] }>("/api/board/requests", { signal });
+      return data.requests;
+    });
+    if (refreshBoard === refresh && notice.dataset.boardOffline) {
+      notice.textContent = "";
+      delete notice.dataset.boardOffline;
+    }
+  } catch (e) {
+    if (refreshBoard === refresh && !signal?.aborted) {
+      notice.dataset.boardOffline = "true";
+      notice.textContent = "Board updates paused. " + message(e);
+    }
+  } finally {
+    if (refreshBoard === refresh && !signal?.aborted) scheduleBoardRefresh();
+  }
+}
 let displayedScope: string | undefined;
 const dialog = node<HTMLDialogElement>("detail");
 const root = node("view"),
@@ -62,8 +92,10 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   });
   if (res.status === 401 || res.status === 403 || res.redirected)
     throw new Error("Sign in and reload this page.");
-  if (res.status === 409)
-    throw new Error("This task has changed. Reopen it to see the latest version.");
+  if (res.status === 409) {
+    const body = await res.json().catch(() => null) as { error?: string } | null;
+    throw new Error(launchConflictMessages[body?.error ?? ""] ?? "This task has changed. Reopen it to see the latest version.");
+  }
   if (res.status === 404) throw new Error("Task not found.");
   if (!res.ok) throw new Error("Could not load records from the server.");
   if (!res.headers.get("content-type")?.includes("application/json"))
@@ -191,6 +223,9 @@ function syncHead() {
 }
 async function load(done = "") {
   window.clearTimeout(officeTimer);
+  window.clearTimeout(boardTimer);
+  refreshBoard = undefined;
+  delete notice.dataset.boardOffline;
   request?.abort();
   const controller = new AbortController();
   request = controller;
@@ -218,12 +253,20 @@ async function load(done = "") {
       if (controller.signal.aborted) return;
       renderSkills(root, data.skills);
     } else if (view === "board") {
-      const data = await api<{ sessions: Session[]; requests: BoardRequest[] }>("/api/board", { signal: controller.signal });
+      const data = await api<{ sessions: Session[]; requests: BoardRequest[]; runnerProjects?: string[] }>("/api/board", { signal: controller.signal });
       if (controller.signal.aborted) return;
-      renderBoard(root, data.sessions, showDetail, complete, data.requests ?? [], (id, change) =>
+      refreshBoard = renderBoard(root, data.sessions, showDetail, complete, data.requests ?? [], (id, change) =>
         api("/api/board/requests/" + encodeURIComponent(id), {
           method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(change),
-        }));
+        }), async (id, attempt_id) => {
+          try {
+            return await api<{ launch: Launch }>("/api/board/requests/" + encodeURIComponent(id) + "/start", {
+              method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ attempt_id }),
+            });
+          } catch (e) {
+            throw new Error(message(e));
+          }
+        }, data.runnerProjects ?? []);
     } else {
       const q = new URLSearchParams({ from: start.toISOString(), to: end.toISOString() });
       const data = await api<WeekData>("/api/blocks?" + q, { signal: controller.signal });
@@ -251,6 +294,7 @@ async function load(done = "") {
     if (!controller.signal.aborted) {
       root.removeAttribute("aria-busy");
       scheduleOfficeRefresh();
+      scheduleBoardRefresh();
     }
   }
 }
@@ -314,8 +358,12 @@ window.addEventListener("hashchange", () => {
   focusMain();
 });
 document.addEventListener("visibilitychange", () => {
-  if (view !== "office") return;
-  if (document.hidden) window.clearTimeout(officeTimer);
-  else void load();
+  if (view === "office") {
+    if (document.hidden) window.clearTimeout(officeTimer);
+    else void load();
+  } else if (view === "board") {
+    window.clearTimeout(boardTimer);
+    if (!document.hidden) void pollBoard();
+  }
 });
 void load();

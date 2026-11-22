@@ -1,3 +1,4 @@
+import type { StartRequest } from "./launch.js";
 import { planningLanes, type BoardRequest, type SaveRequest } from "./planning.js";
 import { countLabel, el, engineName, stateOf, statusLabel, titleOf, type Session } from "./shared.js";
 
@@ -22,7 +23,9 @@ export function renderBoard(
   complete: (id: string) => Promise<void>,
   plans: BoardRequest[],
   save: SaveRequest,
-): void {
+  start: StartRequest,
+  runnerProjects: string[],
+) {
   const requests = pending.get(root) ?? new Map<string, Promise<void>>();
   pending.set(root, requests);
   const sorted = [...sessions].sort(
@@ -30,7 +33,10 @@ export function renderBoard(
   );
   const board = el("div", "worklog-board");
   const columns = el("div", "board-lanes");
-  columns.append(...planningLanes(plans, save, sessions));
+  function requestLane() {
+    return { list: el("ul", "board-list board-launched"), countRequests: (_count: number) => {} };
+  }
+  const activity = { running: requestLane(), completed: requestLane() };
   let dragged: (() => void) | undefined;
   function endDrag() {
     dragged = undefined;
@@ -103,6 +109,13 @@ export function renderBoard(
       card.append(content);
       list.append(card);
     }
+    if (state !== "waiting") {
+      activity[state].countRequests = n => {
+        count.textContent = String(items.length + n);
+        count.setAttribute("aria-label", countLabel(items.length + n, "task"));
+      };
+      lane.append(activity[state].list);
+    }
     lane.append(list);
     if (state === "completed") {
       lane.ondragover = (event) => {
@@ -119,6 +132,9 @@ export function renderBoard(
     }
     columns.append(lane);
   }
+  const planning = planningLanes(plans, save, sessions, start, activity, runnerProjects);
+  columns.prepend(...planning.sections);
   board.append(columns);
   root.replaceChildren(board);
+  return planning.refresh;
 }
