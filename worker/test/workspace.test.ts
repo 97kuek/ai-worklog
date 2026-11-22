@@ -303,18 +303,32 @@ it("saves planning edits and lane changes atomically, including retries and stal
   expect((await put({ ...original, expected: edited })).status).toBe(200);
 });
 
-it("shows resumed work in the office after manual completion while keeping the board completion", async () => {
+it("reopens previously completed work across Board, Office and task details, and can complete it again", async () => {
   const { request, upload, board, post } = await setup();
   const original = example.sessions[0]!;
   await upload([original]);
   const id = (await board()).sessions[0]!.id;
-  expect((await request("/api/sessions/" + id + "/complete", undefined, post)).status).toBe(200);
-  const later = new Date(NOW + 1000).toISOString();
-  await upload([{ ...original, observed_status: { state: "running", at: later } }]);
-  const read = async () => (await (await request("/api/board?status=running")).json<{ sessions: Session[] }>()).sessions;
-  expect(await read()).toMatchObject([{ id, completed_at: new Date(NOW).toISOString() }]);
-  await upload([{ ...original, observed_status: { state: "waiting", at: new Date(NOW + 2000).toISOString() } }]);
-  expect(await read()).toEqual([]);
+  const path = "/api/sessions/" + id;
+  const complete = () => request(path + "/complete", undefined, post);
+  const list = async (url: string) => (await (await request(url)).json<{ sessions: Session[] }>()).sessions;
+  expect((await complete()).status).toBe(200);
+  const weekAgo = NOW - 7 * 86400_000;
+  await env.DB.prepare("UPDATE sessions SET completed_at = ?, observed_at = ? WHERE id = ?")
+    .bind(weekAgo, weekAgo, id).run();
+  expect(await list("/api/board/updates")).toEqual([]);
+  const at = (n: number) => new Date(NOW + n).toISOString();
+  await upload([{ ...original, observed_status: { state: "running", at: at(1) } }]);
+  const active = [{ id, completed_at: null, observed_status: { state: "running" } }];
+  for (const endpoint of ["/api/board", "/api/board/updates", "/api/board?status=running"]) {
+    expect(await list(endpoint)).toMatchObject(active);
+  }
+  expect(await (await request(path)).json()).toMatchObject({ session: active[0] });
+  expect((await complete()).status).toBe(409);
+  await upload([{ ...original, observed_status: { state: "waiting", at: at(2) } }]);
+  expect(await list("/api/board?status=running")).toEqual([]);
+  expect(await list("/api/board/updates")).toMatchObject([{ id, completed_at: null, observed_status: { state: "waiting" } }]);
+  expect((await complete()).status).toBe(200);
+  expect(await list("/api/board/updates")).toMatchObject([{ id, completed_at: at(2) }]);
 });
 
 it("polls both terminal engines through running, waiting and completion without returning hidden history", async () => {
@@ -342,7 +356,7 @@ it("polls both terminal engines through running, waiting and completion without 
   }
   expect((await poll()).sessions.map(s => s.completed_at)).toEqual([stamp(0), stamp(0)]);
   const old = waiting.sessions[0]!;
-  await env.DB.prepare("UPDATE sessions SET completed_at = ? WHERE id = ?").bind(NOW - 7 * 24 * 3600_000, old.id).run();
+  await env.DB.prepare("UPDATE sessions SET completed_at = ?1, observed_at = ?1 WHERE id = ?2").bind(NOW - 7 * 24 * 3600_000, old.id).run();
   expect((await poll()).sessions.map(s => s.id)).not.toContain(old.id);
   expect((await request("/api/sessions/" + old.id)).status).toBe(200);
 });
