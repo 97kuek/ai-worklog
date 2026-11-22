@@ -382,3 +382,33 @@ it("stops a previously delivered claim if its Mac loses permission before confir
   expect((await s.result(attempt, "running")).status).toBe(409);
   expect((await s.board()).requests[0]?.launch).toMatchObject({state: "failed", error: "project_disabled"});
 });
+
+it("explains queued waits using only eligible Macs and keeps busy workers distinct from sleeping ones", async () => {
+  const s = await setup();
+  await s.queue();
+  const waitingPath = "/api/board/requests/" + crypto.randomUUID();
+  const waitingId = waitingPath.split("/").pop();
+  await s.call(waitingPath, s.user, "PUT", card);
+  await s.call(waitingPath, s.user, "PUT", { stage: "queued" });
+  async function queuedCard() {
+    return (await s.board()).requests.find(r => r.id === waitingId);
+  }
+
+  expect(await queuedCard()).toMatchObject({ wait_reason: "next_poll" });
+  s.tick(120_000);
+  expect(await queuedCard()).toMatchObject({ wait_reason: "waiting_for_mac" });
+  await s.claim(s.otherMac, { projects: ["other"], engines: ["codex"] });
+  expect(await queuedCard()).toMatchObject({ wait_reason: "waiting_for_mac" });
+
+  const { job } = await (await s.call("/api/runner/claim", s.mac, "PUT", { ...capabilities, auto_queue: true }))
+    .json<{job: { attempt_id: string }}>();
+  await s.result(job.attempt_id, "running");
+  s.tick(180_000);
+  expect(await queuedCard()).toMatchObject({ wait_reason: "mac_busy" });
+  await s.claim(s.otherMac);
+  expect(await queuedCard()).toMatchObject({ wait_reason: "next_poll" });
+  await s.result(job.attempt_id, "completed");
+  await s.claim(s.otherMac, { projects: ["other"], engines: ["codex"] });
+  await s.claim(s.mac, { projects: ["demo"], engines: ["claude_code"] });
+  expect(await queuedCard()).toMatchObject({ wait_reason: "check_settings" });
+});

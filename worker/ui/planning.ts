@@ -1,4 +1,4 @@
-import { failureMessage } from "./launch.js";
+import { failureMessage, queueWaitLabels } from "./launch.js";
 import { requestComposer, type RequestFields, type RequestState, type BoardRequest, type Stage } from "./request-composer.js";
 import { countLabel, el, engineName, type Session } from "./shared.js";
 
@@ -66,13 +66,13 @@ export function planningLanes(requests: BoardRequest[], save: SaveRequest, sessi
     revision++;
     try {
       if (original) {
-        const { id: _id, launch: _launch, ...expected } = original;
+        const { id: _id, launch: _launch, wait_reason: _wait, ...expected } = original;
         await save(id, { ...fields, stage, expected });
       } else {
         await save(id, fields);
       }
       errors.delete(id);
-      items.set(id, { ...original, ...fields, id, stage });
+      items.set(id, { ...original, ...fields, id, stage, wait_reason: undefined });
     } finally {
       busy.delete(id);
       revision++;
@@ -95,7 +95,7 @@ export function planningLanes(requests: BoardRequest[], save: SaveRequest, sessi
     try {
       await save(id, { stage });
       items.delete(id);
-      items.set(id, { ...item, stage, launch: stage === "queued" ? undefined : item.launch });
+      items.set(id, { ...item, stage, wait_reason: undefined, launch: stage === "queued" ? undefined : item.launch });
     } catch (e) {
       errors.set(id, e instanceof Error ? e.message : "Could not move request.");
     } finally {
@@ -138,8 +138,9 @@ export function planningLanes(requests: BoardRequest[], save: SaveRequest, sessi
     }
     if (working) card.setAttribute("aria-busy", "true");
     const state = item.launch?.state;
-    const status = state === "pending" ? "Waiting for Mac" : state === "claimed" ? "Starting on Mac"
-      : state === "failed" ? "Launch failed" : undefined;
+    const status = state === "claimed" ? "Starting on Mac" : state === "failed" ? "Launch failed"
+      : item.stage === "queued" && (!state || state === "pending")
+        ? (item.wait_reason ? queueWaitLabels[item.wait_reason] : "Waiting for Mac") : undefined;
     if (status) card.append(el("p", "request-status", status));
     if (state === "failed") {
       const retry = item.stage === "queued" ? " Move to Backlog, then queue again to retry." : "";

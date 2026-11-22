@@ -277,7 +277,7 @@ it("persists owner planning requests, retries additions and moves without starti
   expect((await change({ stage: "queued" })).status).toBe(200);
   expect((await change({ title: "Plan", ...metadata })).status).toBe(200);
   expect((await change({ stage: "queued" })).status).toBe(200);
-  expect(await (await request("/api/board")).json()).toEqual({ sessions: [], runnerProjects: ["demo"], requests: [{ id, title: "Plan", ...metadata, stage: "queued" }] });
+  expect(await (await request("/api/board")).json()).toEqual({ sessions: [], runnerProjects: ["demo"], requests: [{ id, title: "Plan", ...metadata, stage: "queued", wait_reason: "next_poll" }] });
   expect(await (await request("/api/board?status=running")).json()).toEqual({ sessions: [] });
   expect((await change({ stage: "backlog" })).status).toBe(200);
   expect(await (await request("/api/board")).json()).toEqual({ sessions: [], runnerProjects: ["demo"], requests: [{ id, title: "Plan", ...metadata, stage: "backlog" }] });
