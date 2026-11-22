@@ -157,6 +157,8 @@ fn status_hook_persists_only_observations_and_coalesces_collection_requests() {
     assert!(acquire_lock(&home).unwrap().is_none());
     assert_eq!(std::fs::read_dir(&queue).unwrap().count(), 1);
     assert!(pending.is_file());
+    // Concurrent subprocess tests can briefly inherit the descriptor before exec.
+    running.unlock().unwrap();
     drop(running);
     let _next = acquire_lock(&home).unwrap().unwrap();
     assert!(!pending.exists());
