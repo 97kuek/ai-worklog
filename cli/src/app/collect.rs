@@ -1101,6 +1101,50 @@ mod tests {
     }
 
     #[test]
+    fn vanished_codex_middle_and_root_do_not_shrink_family() {
+        let env = Env::new("vanished_codex_root");
+        let day = env.codex().join("sessions/2026/11/20");
+        // c1 → c2 → g1 の孫。フィクスチャは書き換えず、一時フォルダにだけ足す
+        std::fs::write(
+            day.join("rollout-e.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-11-20T05:30:00.000Z","type":"session_meta","payload":{"id":"g1","cwd":"/tmp/proj","originator":"Codex Desktop","thread_source":"subagent","source":{"subagent":{"thread_spawn":{"parent_thread_id":"c2"}}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-11-20T05:31:00.000Z","type":"response_item","payload":{"type":"message","role":"user"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-11-20T05:35:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":7,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":3}}}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let sender = FakeSender::ok();
+        let mut st = State::default();
+        let mut led = Ledger::default();
+        collect(&env.plain(), &mut st, &mut led, &sender);
+        let calls = sender.calls();
+        let before = built(&env, &st, "codex:c1");
+        // 孫の分も c1 に入っている（input はキャッシュ分を除く：(1500 - 900) + 100 + 7）
+        assert_eq!(before.tokens.input, 600 + 100 + 7);
+        let has = |st: &State, id: &str| st.files.values().any(|e| e.codex.as_ref().is_some_and(|c| c.thread_id.as_deref() == Some(id)));
+
+        // 間の子が消えた：孫から根までたどれるので、途中結果を残して何も送らない
+        std::fs::remove_file(day.join("rollout-b.jsonl")).unwrap();
+        let report = collect(&env.plain(), &mut st, &mut led, &sender);
+        assert_eq!(sender.calls(), calls, "{:?}", sender.ids(calls));
+        assert_eq!(report, CollectReport::default());
+        assert!(has(&st, "c2"));
+        assert_eq!(built(&env, &st, "codex:c1"), before);
+
+        // 根も消えた：孫が残っている間は、根と子の途中結果も残して何も送らない
+        std::fs::remove_file(day.join("rollout-a.jsonl")).unwrap();
+        let report = collect(&env.plain(), &mut st, &mut led, &sender);
+        assert_eq!(sender.calls(), calls, "{:?}", sender.ids(calls));
+        assert_eq!(report, CollectReport::default());
+        assert!(has(&st, "c1") && has(&st, "c2") && has(&st, "g1"));
+        assert_eq!(built(&env, &st, "codex:c1"), before);
+    }
+
+    #[test]
     fn whole_session_removed_drops_its_entries() {
         let env = Env::new("whole_session_removed");
         let sender = FakeSender::ok();
