@@ -149,3 +149,80 @@ export async function saveSessions(
   const results = await db.batch(stmts);
   return { rowsChanged: results.reduce((n, r) => n + (r.meta.changes ?? 0), 0) };
 }
+
+/**
+ * Longest block we expect: a block ends after a 30 minute gap, so nobody works 48 hours
+ * without one. A block that started earlier than this before `from` is not looked for,
+ * which lets the (user_id, started_at) index bound the scan to the requested range.
+ */
+export const MAX_BLOCK_SPAN_MS = 48 * 3_600_000;
+
+export type SessionRow = {
+  id: string;
+  tool: string;
+  title: string | null;
+  project: string | null;
+  git_branch: string | null;
+  models: string;
+  invoked_by: string | null;
+  machine_name: string | null;
+  started_at: number;
+  ended_at: number;
+  active_minutes: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+};
+
+export type BlockRow = {
+  session_id: string;
+  seq: number;
+  started_at: number;
+  ended_at: number;
+  message_count: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+};
+
+/** The newest `sessions.updated_at` of this user; 0 when there is none. Used as the ETag. */
+export async function dataVersion(db: D1Database, userId: string): Promise<number> {
+  const row = await db
+    .prepare("SELECT MAX(updated_at) AS v FROM sessions WHERE user_id = ?")
+    .bind(userId)
+    .first<{ v: number | null }>();
+  return row?.v ?? 0;
+}
+
+/** Blocks overlapping [fromMs, toMs) in started_at order, and the sessions they belong to. */
+export async function findBlocks(
+  db: D1Database,
+  userId: string,
+  fromMs: number,
+  toMs: number,
+): Promise<{ sessions: SessionRow[]; blocks: BlockRow[] }> {
+  const where = "user_id = ? AND started_at >= ? AND started_at < ? AND ended_at >= ?";
+  const args = [userId, fromMs - MAX_BLOCK_SPAN_MS, toMs, fromMs] as const;
+  const [blocks, sessions] = await db.batch([
+    db
+      .prepare(
+        `SELECT session_id, seq, started_at, ended_at, message_count,
+                input_tokens, output_tokens, cache_read_tokens, cache_write_tokens
+         FROM blocks WHERE ${where} ORDER BY started_at, session_id, seq`,
+      )
+      .bind(...args),
+    db
+      .prepare(
+        `SELECT s.id, s.tool, s.title, s.project, s.git_branch, s.models, s.invoked_by, m.name AS machine_name,
+                s.started_at, s.ended_at, s.active_minutes,
+                s.input_tokens, s.output_tokens, s.cache_read_tokens, s.cache_write_tokens
+         FROM sessions s JOIN machines m ON m.id = s.machine_id
+         WHERE s.user_id = ? AND s.id IN (SELECT session_id FROM blocks WHERE ${where})
+         ORDER BY s.started_at, s.id`,
+      )
+      .bind(userId, ...args),
+  ]);
+  return { sessions: sessions!.results as SessionRow[], blocks: blocks!.results as BlockRow[] };
+}
