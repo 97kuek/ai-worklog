@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { ConfigError, type Authenticate } from "./auth/identity";
 import { ensureMachine, ensureUser } from "./db/repo";
+import { registerBlockRoutes } from "./routes/blocks";
 import { registerSessionRoutes } from "./routes/sessions";
 
 export type Principal =
@@ -41,6 +42,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   });
 
   registerSessionRoutes(app, now);
+  registerBlockRoutes(app);
 
   app.onError((err, c) => {
     if (err instanceof ConfigError) {
