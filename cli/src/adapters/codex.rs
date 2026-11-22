@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
@@ -207,6 +208,18 @@ fn apply_line(st: &mut CodexFileState, line: Line) {
                 observe_turn(st, line.kind, at, payload);
             }
             if line.kind != "event_msg" {
+                if matches!(st.role, Some(CodexRole::Main)) && st.user_texts.len() < MAX_USER_TEXTS
+                    && payload.contains(r#""user""#)
+                    && let Ok(event) = serde_json::from_str::<TurnEvent>(payload)
+                    && event.kind == "message" && event.role.as_deref() == Some("user")
+                {
+                    let text = event.content.into_iter().flatten()
+                        .filter(|part| part.kind == "input_text")
+                        .filter_map(|part| part.text)
+                        .filter(|text| is_user_request(text))
+                        .collect::<Vec<_>>().join("\n");
+                    record_user_text(st, &text);
+                }
                 return;
             }
             if payload.contains("\"token_count\"") {
@@ -223,10 +236,27 @@ fn apply_line(st: &mut CodexFileState, line: Line) {
                 && let Ok(UserMessage { kind, message: Some(m) }) = serde_json::from_str::<UserMessage>(payload)
                 && kind == "user_message" && !m.trim().is_empty()
             {
-                st.user_texts.push(m.chars().take(MAX_USER_TEXT_CHARS).collect());
+                record_user_text(st, &m);
             }
         }
         _ => {}
+    }
+}
+
+fn is_user_request(text: &str) -> bool {
+    let text = text.trim_start();
+    !text.is_empty() && !text.starts_with("# AGENTS.md")
+        && !["<environment_context", "<instructions", "<INSTRUCTIONS", "<subagent_notification",
+            "<turn_aborted", "<user_shell_command", "<permissions instructions", "<collaboration_mode",
+            "<system-reminder"].iter().any(|prefix| text.starts_with(prefix))
+}
+
+fn record_user_text(st: &mut CodexFileState, text: &str) {
+    if !is_user_request(text) { return; }
+    let excerpt: String = text.trim().chars().take(MAX_USER_TEXT_CHARS).collect();
+    // Some clients record the same user turn in both event envelopes.
+    if st.user_texts.last() != Some(&excerpt) {
+        st.user_texts.push(excerpt);
     }
 }
 
@@ -309,7 +339,34 @@ fn observe_turn(st: &mut CodexFileState, envelope: &str, at: Millis, payload: &s
 }
 
 pub fn read_thread_titles(codex_dir: &Path) -> HashMap<String, String> {
-    read_titles(&codex_dir.join("session_index.jsonl"))
+    let mut titles = read_titles(&codex_dir.join("session_index.jsonl"));
+    let db = codex_dir.join("state_5.sqlite");
+    if db.is_file() {
+        // Desktop also puts the opening prompt in title when no name has been assigned.
+        // Check both desktop and index candidates against that placeholder before using them.
+        let sql = "WITH labels AS (
+            SELECT id, trim(CASE WHEN trim(coalesce(name,'')) <> '' THEN name ELSE title END) AS candidate,
+                trim(first_user_message) AS opening, name FROM threads
+        ) SELECT id, CASE WHEN length(candidate) BETWEEN 1 AND 200
+            AND (trim(coalesce(name,'')) <> '' OR coalesce(opening,'') <> '')
+            AND instr(coalesce(opening,''),candidate) <> 1 THEN candidate END AS label,
+            substr(opening,1,200) AS opening_prefix FROM labels";
+        if let Ok(output) = Command::new("sqlite3").args(["-init", "/dev/null", "-readonly", "-json"])
+            .arg(db).arg(sql).output()
+            && output.status.success()
+            && let Ok(rows) = serde_json::from_slice::<Vec<ThreadLabel>>(&output.stdout)
+        {
+            for row in rows {
+                if let Some(label) = row.label.as_deref().and_then(valid_label) {
+                    titles.insert(row.id, label.to_owned());
+                } else if titles.get(&row.id).is_some_and(|name|
+                    row.opening_prefix.as_deref().is_some_and(|opening| opening.starts_with(name))) {
+                    titles.remove(&row.id);
+                }
+            }
+        }
+    }
+    titles
 }
 
 /// Follows parent links up to 32 levels. None for Excluded threads and for
@@ -430,6 +487,19 @@ fn role_of(meta: &SessionMeta) -> CodexRole {
     }
 }
 
+#[derive(Deserialize)]
+struct ThreadLabel {
+    id: String,
+    label: Option<String>,
+    opening_prefix: Option<String>,
+}
+
+fn valid_label(text: &str) -> Option<&str> {
+    let label = text.trim();
+    (!label.is_empty() && label.encode_utf16().count() <= 200 && !label.contains(char::is_control))
+        .then_some(label)
+}
+
 fn read_titles(path: &Path) -> HashMap<String, String> {
     #[derive(Deserialize)]
     struct Entry {
@@ -438,8 +508,10 @@ fn read_titles(path: &Path) -> HashMap<String, String> {
     }
     let mut titles = HashMap::new();
     let _ = for_each_matching_line(path, &[], |bytes| {
-        if let Ok(Entry { id, thread_name: Some(name) }) = serde_json::from_slice::<Entry>(bytes) {
-            titles.insert(id, name);
+        if let Ok(Entry { id, thread_name: Some(name) }) = serde_json::from_slice::<Entry>(bytes)
+            && let Some(label) = valid_label(&name)
+        {
+            titles.insert(id, label.to_owned());
         }
     });
     titles
@@ -725,6 +797,40 @@ mod tests {
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].native_session_id, "c1");
         assert_eq!(total(&v[0]), TokenUsage { input: 700, output: 90, cache_read: 900, cache_write: 0 });
+    }
+
+    #[test]
+    fn desktop_names_survive_a_missing_index_and_skip_prompt_placeholders() {
+        let dir = temp_dir("thread-labels");
+        let db = dir.join("state_5.sqlite");
+        fs::write(dir.join("session_index.jsonl"), r#"{"id":"b","thread_name":"A short question"}"#).unwrap();
+        let status = Command::new("sqlite3").arg(&db).arg(
+            "CREATE TABLE threads(id TEXT, name TEXT, title TEXT, first_user_message TEXT);
+             INSERT INTO threads VALUES ('a','Saved name','Question','Question'),
+                ('b',NULL,'A short question','A short question with private context'),
+                ('c',NULL,'Summarized title','Question'),
+                ('d',NULL,'raw text',NULL);"
+        ).status().unwrap();
+        assert!(status.success());
+        assert_eq!(read_thread_titles(&dir), HashMap::from([
+            ("a".into(), "Saved name".into()), ("c".into(), "Summarized title".into()),
+        ]));
+    }
+
+    #[test]
+    fn desktop_user_turns_ignore_context_and_duplicate_envelopes() {
+        let mut state = CodexFileState { role: Some(CodexRole::Main), ..Default::default() };
+        for (envelope, payload) in [
+            ("response_item", serde_json::json!({"type":"message","role":"user","content":[
+                {"type":"input_text","text":"# AGENTS.md instructions"},
+                {"type":"input_text","text":"<environment_context>metadata"},
+                {"type":"input_text","text":"Fix calendar dates"}]})),
+            ("event_msg", serde_json::json!({"type":"user_message","message":"Fix calendar dates"})),
+        ] {
+            let line = serde_json::json!({"timestamp":"2026-11-20T05:00:00Z","type":envelope,"payload":payload}).to_string();
+            apply_line(&mut state, serde_json::from_str(&line).unwrap());
+        }
+        assert_eq!(state.user_texts, ["Fix calendar dates"]);
     }
 
     #[test]

@@ -456,6 +456,16 @@ struct NamingRule {
 /// 名前がなく、試した回数が上限未満で、材料が十分あるか止まっているセッションを、
 /// 1回に max_per_run 件まで名付ける
 fn name_sessions(namer: &dyn Namer, rule: &NamingRule, ledger: &mut Ledger, built: &[Built], report: &mut CollectReport) {
+    // A native rename should also take effect when Haiku is unavailable or its budget is exhausted.
+    for b in built.iter().filter(|b| b.session.tool == Tool::Codex) {
+        if let Some(title) = &b.session.source_title {
+            let entry = ledger.sessions.entry(b.key.clone()).or_default();
+            if entry.title.as_ref() != Some(title) {
+                entry.title = Some(title.clone());
+                report.names_assigned += 1;
+            }
+        }
+    }
     let mut tried = 0;
     for b in built {
         if tried >= rule.max_per_run {
@@ -894,7 +904,7 @@ mod tests {
         state::save(&home.join("state.json"), &st).unwrap();
         ledger::save(&home.join("sent.json"), &led).unwrap();
         let calls = sender.calls();
-        assert_eq!(namer.calls.get(), 3);
+        assert_eq!(namer.calls.get(), 2);
 
         // 途中結果のファイルだけが壊れ、サブエージェントのログも消えた
         std::fs::write(home.join("state.json"), "garbage").unwrap();
@@ -906,9 +916,10 @@ mod tests {
         let report = collect(&opts, &mut st, &mut led, &sender);
         // 全部読み直すが、小さくなった s1 も、変わらない c1 / s2 も送らない
         assert_eq!(sender.calls(), calls, "{:?}", sender.ids(calls));
-        assert_eq!(namer.calls.get(), 3);
+        assert_eq!(namer.calls.get(), 2);
         assert!(report.errors.iter().any(|e| e == "skipped shrinking session claude_code:s1"), "{:?}", report.errors);
-        for key in ["claude_code:s1", "codex:c1", "claude_code:s2"] {
+        assert_eq!(led.sessions["codex:c1"].title.as_deref(), Some("Codex task"));
+        for key in ["claude_code:s1", "claude_code:s2"] {
             assert_eq!(led.sessions[key].title.as_deref(), Some("デモの改修"), "{key}");
         }
     }
@@ -1038,7 +1049,7 @@ mod tests {
 
         let report = collect(&opts, &mut st, &mut led, &sender);
         assert_eq!(namer.calls.get(), 1);
-        assert_eq!(report.names_assigned, 1);
+        assert_eq!(report.names_assigned, 2);
         let material = namer.materials.borrow()[0].clone();
         for text in ["デモ作業", "hi", "again", "third"] {
             assert!(material.contains(text), "{text} missing from {material}");
@@ -1096,19 +1107,19 @@ mod tests {
 
         let first = collect(&opts, &mut st, &mut led, &sender);
         assert_eq!(namer.calls.get(), 1);
-        assert_eq!(first.names_assigned, 0);
+        assert_eq!(first.names_assigned, 1);
         // 名前がなくても送る
         assert_eq!(sender.ids(0), ["s1", "c1", "s2"]);
-        assert!(sender.sessions(0).iter().all(|s| s["title"].is_null()));
+        assert_eq!(session(&sender.sessions(0), "c1")["title"], "Codex task");
 
-        for run in 2..=6 {
+        for run in 2..=4 {
             collect(&opts, &mut st, &mut led, &sender);
             assert_eq!(namer.calls.get(), run, "run {run}");
         }
         collect(&opts, &mut st, &mut led, &sender);
         collect(&opts, &mut st, &mut led, &sender);
-        assert_eq!(namer.calls.get(), 6);
-        for key in ["claude_code:s1", "codex:c1", "claude_code:s2"] {
+        assert_eq!(namer.calls.get(), 4);
+        for key in ["claude_code:s1", "claude_code:s2"] {
             assert_eq!(led.sessions[key].name_attempts, 2, "{key}");
             assert_eq!(led.sessions[key].title, None, "{key}");
         }
@@ -1131,7 +1142,7 @@ mod tests {
         for run in 1..=4 {
             let report = collect(&opts, &mut st, &mut led, &sender);
             assert_eq!(namer.calls.get(), run, "run {run}");
-            assert_eq!(report.names_assigned, 0);
+            assert_eq!(report.names_assigned, usize::from(run == 1));
         }
         for key in ["claude_code:s1", "codex:c1", "claude_code:s2"] {
             assert_eq!(led.sessions.get(key).map_or(0, |s| s.name_attempts), 0, "{key}");
@@ -1144,7 +1155,7 @@ mod tests {
         let namer = FakeNamer::new(Some("デモの改修"));
         let opts = env.opts(ts("2026-11-22T00:00:00.000Z"), Some((&namer, 1, 10)), ChunkLimits { ..DEFAULT_CHUNK });
         let report = collect(&opts, &mut st, &mut led, &sender);
-        assert_eq!(report.names_assigned, 3);
+        assert_eq!(report.names_assigned, 2);
         assert!(user_texts_of(&st, "s1").is_empty());
     }
 
@@ -1652,7 +1663,7 @@ mod tests {
         assert_eq!(forced.files_read, first.files_read - offline.len());
         assert!(forced.bytes_read > 0);
         assert_eq!(forced.sessions_changed, 0);
-        assert_eq!(namer.calls.get(), 3);
+        assert_eq!(namer.calls.get(), 2);
         assert_eq!(ledger::load(&home.join("sent.json")).sessions, before);
         let rebuilt = state::load(&state_path);
         for key in ["claude_code:s1", "claude_code:s2", "codex:c1"] {
