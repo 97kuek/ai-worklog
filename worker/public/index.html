@@ -20,7 +20,7 @@
     <header class="mast">
       <div class="mast-inner">
         <a href="#log" class="brand" aria-label="Taskfolio Work log">
-          <span class="mark"><img src="/taskfolio-mark.webp" height="32" width="32" alt="" /></span>Taskfolio
+          <span class="mark"><img src="/taskfolio-mark.webp" height="32" width="32" alt="" /></span><span class="brand-name">Taskfolio</span>
         </a>
         <button
           type="button"
@@ -42,6 +42,9 @@
           <a href="#office">Office</a>
         </nav>
         <div class="mast-actions">
+          <a id="open-help" href="#help" class="icon-button" lang="ja" aria-label="使い方" title="使い方">
+            <img src="/icons/lucide/circle-help.svg" width="20" height="20" alt="" />
+          </a>
           <a id="open-settings" href="#settings" class="icon-button" aria-label="Settings" title="Settings">
             <img src="/icons/lucide/settings.svg" width="20" height="20" alt="" />
           </a>
@@ -76,6 +79,108 @@
       <section id="view" aria-labelledby="title"></section>
       <noscript>Enable JavaScript to open Taskfolio.</noscript>
     </main>
+    <template id="guide-overview">
+      <div class="help-guide" lang="ja">
+        <div class="guide-switch">
+          <p>初めて使う Mac では、記録を送るコレクターを設定します。ボードの依頼も実行する場合は、ランナーを追加してください。<a href="#help/mac">Mac のセットアップ手順を開く</a></p>
+        </div>
+        <section>
+          <h2>作業を振り返る</h2>
+          <dl>
+            <dt><a href="#log">作業記録（Work log）</a></dt>
+            <dd>週を選ぶと、Claude Code と Codex の作業を一覧で確認できます。曜日や状態で絞り込み、タスク名を選ぶと、ブランチ、モデル、トークン数、作業した時間帯が開きます。詳細の鉛筆で変更した名前は、次の収集後も残ります。</dd>
+            <dt><a href="#calendar">カレンダー（Calendar）</a></dt>
+            <dd>作業した時間帯を週単位で見られます。同時に進めた作業は横に並びます。スマートフォンでは曜日を選んで切り替えます。</dd>
+            <dt><a href="#stats">作業時間の集計（Activity）</a></dt>
+            <dd>週表示で日を選ぶと、その日の時間帯別の集計が開きます。時間帯を選ぶとプロジェクトとモデルの内訳を確認できます。作業時間が重なる部分は各プロジェクトに均等に配分されます。</dd>
+          </dl>
+        </section>
+        <section>
+          <h2>ボードから作業を依頼する</h2>
+          <ol>
+            <li><a href="#board">ボード（Board）</a>の「＋ Add」で依頼文を入力し、登録済みのプロジェクトとエンジンを選びます。「Add to backlog」で依頼を下書き（Backlog）に保存します。</li>
+            <li>カードの「Move to Queued」を押すか、Queued 列にドラッグします。条件に合う Mac が依頼を引き受けると Running に移ります。引き受ける前なら Backlog に戻せます。</li>
+            <li>実行が正常に終わると Completed に移ります。応答の本文は、エンジンが保存した Mac 上のセッション履歴で確認できます。失敗した場合はカードに出たエラーを確認し、原因を解消してから Backlog に戻し、再び Queued に移します。</li>
+          </ol>
+          <p>Mac で直接始めたセッションもボードに表示されます。入力待ち（Waiting）の作業を終えたら、カードの詳細で「Move to Completed」を選びます。完了したセッションで続きを始めると Running に戻り、応答が終わると Waiting に移ります。Completed 列には直近 7 日間の完了分が残ります。</p>
+        </section>
+        <section>
+          <h2>利用状況と Mac の状態を確認する</h2>
+          <dl>
+            <dt><a href="#usage">利用量（Usage）</a></dt>
+            <dd>登録したアカウントごとに入出力トークン数、推定費用、利用枠の残量とリセット時刻を確認できます。</dd>
+            <dt><a href="#skills">スキル（Skills）</a></dt>
+            <dd>各ツールが報告したスキルの名前と説明を表示します。アカウントで絞り込めます。</dd>
+            <dt><a href="#office">オフィス（Office）</a></dt>
+            <dd>作業中のセッションを確認できます。オフィスの人物か一覧のタスク名を選ぶと、作業の詳細が開きます。</dd>
+            <dt><a href="#settings">設定（Settings）</a></dt>
+            <dd>歯車から、Mac ごとの最終接続時刻、作業フォルダー、利用できるエンジンを確認できます。「Test connection」を押すと、次にその Mac が接続した時点で結果が表示されます。</dd>
+          </dl>
+        </section>
+      </div>
+    </template>
+    <template id="guide-mac">
+      <div class="help-guide" lang="ja">
+        <div class="guide-switch"><p><a href="#help">画面の使い方に戻る</a></p></div>
+        <section>
+          <h2>1. Mac に Taskfolio を入れる</h2>
+          <p>接続したい Mac のターミナルで実行します。Cargo がまだない場合は、Homebrew の <code>brew install rust</code> でインストールしてください。</p>
+          <pre><code>git clone https://github.com/97kuek/taskfolio.git
+cd taskfolio</code></pre>
+          <p>すでにソースを取得している場合は、そのフォルダーで次のコマンドから始めます。最後のコマンドで、この Mac にある過去 7 日間の作業記録を確認できます。</p>
+          <pre><code>export PATH="$HOME/.cargo/bin:$PATH"
+cargo install --locked --path cli
+taskfolio --version
+taskfolio scan --since-days 7 --format table</code></pre>
+        </section>
+        <section>
+          <h2>2. この Mac を接続する</h2>
+          <p>Cloudflare Access で Mac ごとにサービストークンを発行し、このサイトの Service Auth ポリシーで許可します。次の例の URL をこのサイトの URL に、Mac の名前とクライアント ID をこの端末の値に置き換えます。</p>
+          <pre><code>taskfolio login --url 'https://tasks.example.com' --machine-name '自分の Mac' --client-id 'この Mac のクライアント ID'</code></pre>
+          <p>続いて表示される入力欄にクライアントシークレットを入力すると、Mac のキーチェーンに保存されます。設定ファイルの場所はログイン時に表示されます。新規インストールでは通常 <code>~/.taskfolio</code> です。</p>
+          <p>別の保存先を使う場合は、ログイン前に <code>TASKFOLIO_HOME</code> を設定し、以降のコマンドでも同じ値を使います。ランナーのインストール時には <code>--state-dir</code> でそのフォルダーを指定します。</p>
+        </section>
+        <section>
+          <h2>3. 作業記録を自動で送る</h2>
+          <p>初期設定では、タスク名の生成に必要な場合、最初のユーザーメッセージの抜粋が Claude Code に渡ります。自動生成を使わない場合は、初回の収集前に <code>config.json</code> の <code>naming.enabled</code> を <code>false</code> にします。</p>
+          <ol>
+            <li><code>taskfolio collect</code> を実行し、<a href="#log">作業記録</a>でセッションがあった週を開きます。</li>
+            <li><code>taskfolio setup</code> で自動収集を有効にします。表示されたフックを、使っているツールの既存設定（<code>~/.claude/settings.json</code> または <code>~/.codex/hooks.json</code>）に追加します。Codex のフックは <code>/hooks</code> で確認できます。</li>
+            <li><code>taskfolio doctor</code> の <code>api</code> 行に <code>GET /api/me -&gt; machine</code> と出たら、Mac の認証は成功です。以後はフックが状態の変化を通知し、定期収集も 10 分ごとに動きます。</li>
+          </ol>
+        </section>
+        <section>
+          <h2>ボードの依頼をこの Mac で実行する</h2>
+          <p>作業を依頼したい Mac にランナーを追加します。Python 3 と、依頼に使う Claude Code または Codex が必要です。</p>
+          <ol>
+            <li>この Mac でエンジンにサインインし、作業先のフォルダーで応答を確認します。Codex には信頼済みの Git リポジトリを使います。</li>
+            <li><code>taskfolio folder add</code> を実行し、Finder で作業フォルダーを選びます。フォルダー名がボードのプロジェクト名になります。別名で登録するには <code>taskfolio folder add --path "/absolute/path/to/project" --name demo</code> を使います。</li>
+            <li>Taskfolio のソースを取得したフォルダーで、次のコマンドを実行します。ランナーは Mac にログインしていてスリープしていない間、約 30 秒ごとに接続します。
+              <pre><code>python3 scripts/install-runner.py "$(command -v taskfolio)"</code></pre>
+            </li>
+            <li><a href="#settings">設定</a>を更新し、フォルダー名とエンジンを確認します。「Test connection」で接続を確かめたら、<a href="#board">ボード</a>から「ファイルを変更せず、現在のフォルダー名を答えてください」などの短い依頼を試せます。</li>
+          </ol>
+          <p>設定画面のフォルダースイッチで、新しい依頼の受付を一時停止・再開できます。Codex の初期設定は読み取り専用です。編集も許可する場合は、状態保存先の <code>runner.json</code> に <code>"codex_sandbox": "workspace-write"</code> をトップレベルの項目として設定します。</p>
+        </section>
+        <section>
+          <h2>Claude Code のアカウントを登録する</h2>
+          <p>利用量とスキルをアカウント別に表示したい場合は、Taskfolio のソースを取得したフォルダーで次を実行します。例の <code>personal</code> はアカウントの識別名、<code>$HOME/.claude</code> はその設定フォルダーです。複数ある場合は <code>--profile</code> をアカウントごとに追加します。</p>
+          <pre><code>python3 scripts/install-claude-usage.py --profile "personal=$HOME/.claude" --binary "$(command -v taskfolio)"
+taskfolio sync-usage</code></pre>
+        </section>
+        <section>
+          <h2>うまくいかないとき</h2>
+          <dl>
+            <dt>ターミナルで taskfolio が見つからない</dt>
+            <dd><code>command -v taskfolio</code> を実行します。何も出なければ、手順 1 の PATH の設定を今開いているターミナルに適用してください。</dd>
+            <dt>記録が表示されない</dt>
+            <dd><code>taskfolio doctor</code> で認証とフックの状態を調べます。既存のログを読み直すには <code>taskfolio collect --rescan</code> を使います。</dd>
+            <dt>依頼が Queued から進まない</dt>
+            <dd>Mac が起きているか、対象フォルダーのスイッチがオンか、使用するエンジンが利用可能かを設定画面で確認します。Mac 側では <code>launchctl print "gui/$(id -u)/dev.taskfolio.runner"</code> と、状態保存先の <code>logs/runner.log</code> で起動状態とエラーを確認できます。</dd>
+          </dl>
+        </section>
+      </div>
+    </template>
     <dialog id="detail" aria-labelledby="detail-title">
       <div class="dialog-head">
         <div id="detail-heading"><h2 id="detail-title">Task details</h2></div>
