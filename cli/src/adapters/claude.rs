@@ -1,7 +1,5 @@
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
 use std::fs;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -9,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::jsonl::read_matching_lines_from;
 use super::time::parse_ts;
-use crate::domain::{RawSession, TokenEvent, TokenUsage, Tool};
+use crate::domain::{Fnv1a, RawSession, TokenEvent, TokenUsage, Tool};
 
 const NEEDLES: &[&str] = &[r#""type":"user""#, r#""type":"assistant""#, r#""type":"custom-title""#];
 const MAX_USER_TEXTS: usize = 3;
@@ -207,6 +205,16 @@ fn user_text(content: Content) -> Option<String> {
     Some(text.chars().take(MAX_USER_TEXT_CHARS).collect())
 }
 
+/// 同じ応答の usage を二度数えないための印
+/// 保存するので、Rust の版で値が変わらない FNV-1a で作る。id の長さを先に入れて区切りを一意にする
+fn usage_key(id: &str, request_id: &str) -> u64 {
+    let mut h = Fnv1a::default();
+    h.write(&(id.len() as u64).to_le_bytes());
+    h.write(id.as_bytes());
+    h.write(request_id.as_bytes());
+    h.finish()
+}
+
 fn add_assistant_usage(st: &mut ClaudeFileState, at: i64, request_id: Option<String>, msg: Message) {
     if let Some(model) = msg.model.filter(|m| !m.starts_with('<')) {
         st.raw.models.insert(model);
@@ -214,13 +222,9 @@ fn add_assistant_usage(st: &mut ClaudeFileState, at: i64, request_id: Option<Str
     let Some(u) = msg.usage else {
         return;
     };
-    let key = (msg.id.unwrap_or_default(), request_id.unwrap_or_default());
-    if !(key.0.is_empty() && key.1.is_empty()) {
-        let mut h = DefaultHasher::new();
-        key.hash(&mut h);
-        if !st.seen.insert(h.finish()) {
-            return;
-        }
+    let (id, request_id) = (msg.id.unwrap_or_default(), request_id.unwrap_or_default());
+    if !(id.is_empty() && request_id.is_empty()) && !st.seen.insert(usage_key(&id, &request_id)) {
+        return;
     }
     st.raw.token_events.push(TokenEvent {
         at,
@@ -257,6 +261,13 @@ pub(crate) fn modified_at_or_after(path: &Path, since: SystemTime) -> bool {
 mod tests {
     use super::*;
     use crate::domain::{build_session, TokenUsage, Tool};
+
+    #[test]
+    fn usage_key_is_a_stable_fnv1a_hash() {
+        // 保存する値なので、Rust の版で変わらないこと
+        assert_eq!(usage_key("msg_1", "req_1"), 0x0ffd3b0b3d30e173);
+        assert_ne!(usage_key("ab", "c"), usage_key("a", "bc"));
+    }
 
     fn load() -> Vec<RawSession> {
         let dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/claude/projects"));

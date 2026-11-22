@@ -1,11 +1,9 @@
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::ops::Range;
 
 use serde::Serialize;
 
 use crate::adapters::time::format_ts;
-use crate::domain::{Session, TokenUsage, Tool};
+use crate::domain::{fnv1a64, Session, TokenUsage, Tool};
 
 pub struct Outgoing<'a> {
     pub session: &'a Session,
@@ -79,12 +77,11 @@ pub fn to_ingest_json(machine_name: &str, items: &[Outgoing<'_>]) -> String {
     serde_json::to_string(&body).unwrap_or_else(|_| "{}".into())
 }
 
-/// Hash of the session's ingest JSON; used to tell whether it was already sent.
+/// FNV-1a hash of the session's ingest JSON; used to tell whether it was already sent.
+/// It is persisted, so it must not depend on the Rust version (unlike `DefaultHasher`).
 pub fn session_fingerprint(item: &Outgoing<'_>) -> u64 {
     let json = serde_json::to_string(&session_out(item)).unwrap_or_default();
-    let mut h = DefaultHasher::new();
-    json.hash(&mut h);
-    h.finish()
+    fnv1a64(json.as_bytes())
 }
 
 pub struct ChunkLimits {
@@ -219,6 +216,15 @@ mod tests {
 
         assert_ne!(base, session_fingerprint(&Outgoing { session: &s, title: Some("b") }));
         assert_ne!(base, session_fingerprint(&Outgoing { session: &s, title: None }));
+    }
+
+    #[test]
+    fn fingerprint_is_fnv1a_of_the_session_json() {
+        // 保存する値なので、Rust の版で変わらないハッシュを使う
+        let s = claude();
+        let item = Outgoing { session: &s, title: Some("a") };
+        let json = serde_json::to_string(&session_out(&item)).unwrap();
+        assert_eq!(session_fingerprint(&item), crate::domain::fnv1a64(json.as_bytes()));
     }
 
     #[test]
