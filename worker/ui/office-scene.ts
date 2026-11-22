@@ -2,10 +2,6 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 
-const positions = [
-  [-0.45, 2.5, -Math.PI / 2], [2.45, 0.2, -Math.PI / 2], [-3.35, 0.2, Math.PI / 2], [-0.45, -2.1, 0],
-  [2.45, 2.5, Math.PI], [-3.35, -2.1, Math.PI], [2.45, -2.1, 0], [-3.35, 2.5, Math.PI / 2], [-0.45, 0.2, Math.PI],
-] as const;
 const home = new THREE.Vector3(8, 10.2, 13);
 const target = new THREE.Vector3(0, 1.52, 0);
 type Desk = {
@@ -175,10 +171,14 @@ export class OfficeScene {
     ground.position.y = baseY - 0.03;
     ground.receiveShadow = true;
     this.world.add(ground);
-    for (const [x, z, angle] of positions) {
+    // The room GLB carries the desk transforms from the editable Blender layout.
+    const anchors = room.children.filter(node => /^DeskAnchor_\d{2}$/.test(node.name))
+      .sort((left, right) => left.name.localeCompare(right.name));
+    if (anchors.length !== 9) throw new Error("Incomplete office layout.");
+    for (const anchor of anchors) {
       const group = new THREE.Group();
-      group.position.set(x, 0, z);
-      group.rotation.y = angle;
+      group.position.copy(anchor.position);
+      group.quaternion.copy(anchor.quaternion);
       group.add(station.clone(true));
       this.furniture.add(group);
       this.desks.push({group, arms: []});
@@ -192,7 +192,6 @@ export class OfficeScene {
     this.seats = ids;
     for (const [i, desk] of this.desks.entries()) {
       const id = ids[i];
-      desk.group.visible = i < 4 || !!id;
       if (desk.id === id) continue;
       if (desk.person) desk.group.remove(desk.person);
       desk.id = id;
