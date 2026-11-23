@@ -1,5 +1,6 @@
 import { residentModels } from "./office-layout.js";
-import { el, engineName, modelSettings, titleOf, type Session } from "./shared.js";
+import type { RunnerSettings } from "./settings.js";
+import { el, fullDate, engineName, modelSettings, titleOf, type Session } from "./shared.js";
 import type { OfficeScene } from "./office-scene.js";
 
 const desksPerRoom = residentModels.length;
@@ -92,6 +93,7 @@ class OfficeView {
   private readonly list = el("ol", "office-desks");
   private readonly count = el("span", "office-count");
   private readonly summary = el("p", "office-summary");
+  private readonly receipts = el("div", "office-receipts");
   private readonly paging = el("div", "office-paging");
   private readonly roomLabel = el("span", "office-room-label");
   private readonly previous = button("Previous room", "office-control", "‹");
@@ -139,7 +141,10 @@ class OfficeView {
     toolbar.append(hint, this.tools);
     scenePanel.append(this.stage, toolbar);
     rosterHead.append(heading, this.count);
-    sidebar.append(rosterHead, this.summary, this.list, this.paging);
+    const settingsLink = el("a", "", "Settings");
+    settingsLink.href = "#settings";
+    this.receipts.append(settingsLink);
+    sidebar.append(rosterHead, this.summary, this.receipts, this.list, this.paging);
     this.layout.append(scenePanel, sidebar);
     this.root.replaceChildren(this.layout);
     void this.loadScene();
@@ -237,7 +242,7 @@ class OfficeView {
     const seats = this.currentSeats();
     const signature = JSON.stringify([this.page, seats.map(id => {
       const s = id && this.tasks.get(id);
-      return s ? [id, titleOf(s), s.tool, s.models, s.model_efforts, s.active_minutes] : null;
+      return s ? [id, titleOf(s), s.started_at, s.tool, s.models, s.model_efforts, s.active_minutes] : null;
     })]);
     const count = this.seats.size;
     if (this.count.textContent !== String(count)) {
@@ -271,12 +276,16 @@ class OfficeView {
       copy.append(el("span", "office-task-title", titleOf(task)));
       const settings = modelSettings(task);
       for (const pair of settings.length ? settings : [{ model: "", effort: null }]) {
-        const meta = el("span", "office-task-meta", [engineName(task.tool), pair.model || "—", "Effort " + (pair.effort ?? "—")].join(" · "));
+        const parts = [pair.model || "—", "Effort " + (pair.effort ?? "—")];
+        if (task.title?.trim()) parts.unshift(engineName(task.tool));
+        const meta = el("span", "office-task-meta", parts.join(" · "));
         copy.append(meta);
       }
       const minutes = task.active_minutes;
       const elapsed = minutes > 0 && minutes < 1 ? "<1" : String(Math.floor(minutes));
-      copy.append(el("span", "office-task-meta", elapsed + " min active"));
+      const timing = elapsed + " min active";
+      copy.append(el("span", "office-task-meta", task.title?.trim() ? timing
+        : timing + " · Started " + fullDate.format(new Date(task.started_at))));
       action.append(seat, copy);
       action.onclick = () => this.open(id);
       action.onmouseenter = action.onfocus = () => this.scene?.select(id);
@@ -285,6 +294,22 @@ class OfficeView {
       this.list.append(row);
     }
     if (focusedId) this.list.querySelector<HTMLButtonElement>('[data-session-id="' + CSS.escape(focusedId) + '"]')?.focus({ preventScroll: true });
+  }
+
+  showReceipts(settings?: RunnerSettings | null) {
+    const receipts = this.receipts;
+    receipts.hidden = settings === undefined;
+    if (settings === undefined) return;
+    const items = [el("p", "", settings ? "Last log received" : "Log receipt times unavailable.")];
+    if (settings) {
+      for (const tool of ["claude_code", "codex"]) {
+        const latest = settings.machines.reduce((last, m) => Math.max(last, m.log_received_at[tool] ?? 0), 0);
+        items.push(el("p", "", engineName(tool) + " · " + (latest ? fullDate.format(latest) : "No receipt yet")));
+      }
+    }
+    // Preserve keyboard focus on the link across Office polls.
+    receipts.querySelectorAll("p").forEach(p => p.remove());
+    receipts.prepend(...items);
   }
 
   dispose() {
@@ -297,12 +322,13 @@ class OfficeView {
 
 let mounted: OfficeView | undefined;
 
-export function renderOffice(root: HTMLElement, sessions: Session[], open: OpenTask) {
+export function renderOffice(root: HTMLElement, sessions: Session[], open: OpenTask, settings?: RunnerSettings | null) {
   if (!mounted || mounted.root !== root || !root.contains(mounted.layout)) {
     disposeOffice();
     mounted = new OfficeView(root, open, sessions);
   }
   mounted.update(sessions, open);
+  mounted.showReceipts(settings);
 }
 
 export function disposeOffice() {

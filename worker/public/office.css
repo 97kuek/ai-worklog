@@ -190,3 +190,7 @@
   .office-layout:not([data-scene="ready"]) .office-toolbar, .office-hint { display: none; }
   .office-roster-head { padding-bottom: 8px; }
 }
+
+.office-receipts { color: var(--muted); margin-block: 12px; }
+.office-receipts p { margin: 4px 0; }
+.office-receipts a { display: inline-flex; align-items: center; min-height: 44px; color: var(--accent); }

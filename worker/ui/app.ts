@@ -312,7 +312,10 @@ async function load(done = "") {
       ]);
       if (controller.signal.aborted) return;
       officeModule = module;
-      module.renderOffice(root, data.sessions, showDetail);
+      const receipts = data.sessions.length ? undefined
+        : await api<RunnerSettings>("/api/settings", { signal: controller.signal }).catch(() => null);
+      if (controller.signal.aborted) return;
+      module.renderOffice(root, data.sessions, showDetail, receipts);
     } else if (view === "usage") {
       const data = await api<{ accounts: AccountUsage[] }>("/api/usage", { signal: controller.signal });
       if (controller.signal.aborted) return;
