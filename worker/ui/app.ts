@@ -9,6 +9,7 @@ import {
   type Session,
   type WeekData,
 } from "./shared.js";
+import { renderSearch, type SearchPage } from "./history-search.js";
 import { installDatePicker } from "./date-picker.js";
 import { renderLog, type LogFilters } from "./log.js";
 import { renderCalendar } from "./calendar.js";
@@ -21,7 +22,7 @@ import { renderStats } from "./stats.js";
 import { renderSettings, type RunnerSettings } from "./settings.js";
 import { renderSkills, type Skill } from "./skills.js";
 
-const pages = { log: "Work log", calendar: "Calendar", board: "Board", stats: "Activity", usage: "Usage", skills: "Skills", office: "Office", settings: "Settings" };
+const pages = { log: "Work log", calendar: "Work log", board: "Board", stats: "Activity", usage: "Usage", skills: "Skills", office: "Office", settings: "Settings" };
 type View = keyof typeof pages;
 function node<T extends HTMLElement>(id: string) {
   return document.getElementById(id) as T;
@@ -31,6 +32,7 @@ function route(): View {
   return Object.hasOwn(pages, hash) ? hash as View : "log";
 }
 let view = route();
+let searchTerm = "";
 let anchor = new Date();
 anchor.setHours(0, 0, 0, 0);
 let weekProjects: (string | null)[] | undefined;
@@ -257,10 +259,16 @@ function syncHead() {
   document.title = pages[view] + " | Taskfolio";
   node("title").textContent = pages[view];
   for (const a of document.querySelectorAll<HTMLAnchorElement>("nav a, #open-settings")) {
-    if (a.hash === "#" + view) a.setAttribute("aria-current", "page");
+    if (a.hash === "#" + view || (a.hash === "#log" && view === "calendar")) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   }
-  node("week-controls").hidden = !hasDateRange();
+  const history = view === "log" || view === "calendar";
+  node("history-view").hidden = !history;
+  node("history-list").setAttribute("aria-pressed", String(view === "log"));
+  node("history-calendar").setAttribute("aria-pressed", String(view === "calendar"));
+  node("history-search").hidden = view !== "log";
+  node("clear-search").hidden = !searchTerm;
+  node("week-controls").hidden = !hasDateRange() || (view === "log" && Boolean(searchTerm));
   node("stats-period").hidden = view !== "stats";
   for (const period of ["daily", "weekly"] as const) {
     node(period).setAttribute("aria-pressed", String(statsPeriod === period));
@@ -297,7 +305,7 @@ async function load(done = "") {
   syncHead();
   const start = rangeStart();
   const end = addDays(start, isDaily() ? 1 : 7);
-  const scope = !hasDateRange() ? view : view + localDate(start) + localDate(end);
+  const scope = view === "log" && searchTerm ? "search:" + searchTerm : !hasDateRange() ? view : view + localDate(start) + localDate(end);
   root.setAttribute("aria-busy", "true");
   if (displayedScope !== scope) {
     displayedScope = undefined;
@@ -316,6 +324,19 @@ async function load(done = "") {
         : await api<RunnerSettings>("/api/settings", { signal: controller.signal }).catch(() => null);
       if (controller.signal.aborted) return;
       module.renderOffice(root, data.sessions, showDetail, receipts);
+    } else if (view === "log" && searchTerm) {
+      const query = searchTerm;
+      const read = (cursor?: NonNullable<SearchPage["next"]>) => {
+        const params = new URLSearchParams({ q: query });
+        if (cursor) {
+          params.set("before", String(cursor.start));
+          params.set("id", cursor.id);
+        }
+        return api<SearchPage>("/api/sessions/search?" + params, { signal: controller.signal });
+      };
+      const matches = await read();
+      if (controller.signal.aborted) return;
+      renderSearch(root, query, matches, read, showDetail, controller.signal);
     } else if (view === "usage") {
       const data = await api<{ accounts: AccountUsage[] }>("/api/usage", { signal: controller.signal });
       if (controller.signal.aborted) return;
@@ -382,6 +403,22 @@ function goDate(d: Date, projects?: (string | null)[]) {
   filters.day = null;
   void load();
 }
+node("history-list").onclick = () => { location.hash = "log"; };
+node("history-calendar").onclick = () => { location.hash = "calendar"; };
+const queryInput = node<HTMLInputElement>("history-query");
+node("history-search").onsubmit = event => {
+  event.preventDefault();
+  searchTerm = queryInput.value.trim();
+  void load();
+};
+function clearSearch() {
+  queryInput.value = "";
+  searchTerm = "";
+  void load();
+  queryInput.focus();
+}
+node("clear-search").onclick = clearSearch;
+queryInput.oninput = () => { if (searchTerm && !queryInput.value) clearSearch(); };
 node("prev").onclick = () => goDate(addDays(anchor, isDaily() ? -1 : -7));
 node("next").onclick = () => goDate(addDays(anchor, isDaily() ? 1 : 7));
 node("today").onclick = () => goDate(new Date());
@@ -435,11 +472,15 @@ document.querySelector<HTMLAnchorElement>(".skip")?.addEventListener("click", (e
 window.addEventListener("hashchange", () => {
   toggleMenu(false);
   if (view === "office" && route() !== "office") officeModule?.disposeOffice();
+  const switchingHistory = (view === "log" && route() === "calendar") || (view === "calendar" && route() === "log");
   view = route();
+  searchTerm = "";
+  queryInput.value = "";
   if (dialog.open) dialog.close();
   if (picker.open) picker.close();
   void load();
-  focusMain();
+  if (switchingHistory) node(view === "log" ? "history-list" : "history-calendar").focus({ preventScroll: true });
+  else focusMain();
 });
 document.addEventListener("visibilitychange", () => {
   if (liveView()) {

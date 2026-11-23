@@ -421,3 +421,30 @@ it("skips unchanged task details, including after identical uploads", async () =
   await changed();
   expect((await conditional()).status).toBe(304);
 });
+
+it("searches all weeks by displayed title or project, with literal matching and stable pagination", async () => {
+  const { upload, request, machine } = await setup();
+  const base = example.sessions[0]!;
+  const history = Array.from({ length: 32 }, (_, i) => ({
+    ...base, native_session_id: "search-" + i, title: "Search " + i, project: "Archive_100%",
+    started_at: "2025-01-01T00:00:00Z", ended_at: "2025-01-01T01:00:00Z",
+    blocks: [{ ...base.blocks[0]!, started_at: "2025-01-01T00:00:00Z", ended_at: "2025-01-01T01:00:00Z" }],
+  }));
+  await upload(history);
+  const search = (query: string) => request("/api/sessions/search?" + query);
+  const query = new URLSearchParams({ q: "archive_100%" });
+  type Page = { sessions: { id: string }[]; next: { start: number; id: string } | null };
+  const first = await (await search(query.toString())).json<Page>();
+  expect(first.sessions).toHaveLength(30);
+  query.set("before", String(first.next!.start));
+  query.set("id", first.next!.id);
+  const second = await (await search(query.toString())).json<Page>();
+  expect(second.next).toBeNull();
+  expect(new Set([...first.sessions, ...second.sessions].map(s => s.id)).size).toBe(32);
+  const id = first.sessions[0]!.id;
+  await request("/api/sessions/" + id + "/title", undefined, titleUpdate("手動の名前", null));
+  expect((await (await search("q=" + encodeURIComponent("手動"))).json<Page>()).sessions).toMatchObject([{ id }]);
+  expect((await (await search("q=ARCHIVE_1%25")).json<Page>()).sessions).toHaveLength(0);
+  expect((await search("q=&before=x")).status).toBe(400);
+  expect((await request("/api/sessions/search?q=archive", machine)).status).toBe(403);
+});

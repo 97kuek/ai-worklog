@@ -832,3 +832,13 @@ main:focus {
   .skills-table tbody td:first-child { color: var(--muted); }
   .filter-dialog { margin: auto auto max(8px, env(safe-area-inset-bottom)); width: calc(100% - 16px); }
 }
+
+#history-search { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+#history-query { flex: 1 1 10rem; min-width: 0; max-width: 25rem; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--white); color: var(--ink); font: inherit; }
+#history-search :is(input, button), .history-matches button { min-height: 44px; }
+.history-matches { padding: 0; list-style: none; }
+.history-matches li { border-bottom: 1px solid var(--line-soft); }
+.history-matches button { width: 100%; padding: 10px 0; display: grid; gap: 3px; text-align: start; overflow-wrap: anywhere; }
+.history-matches time, .history-matches .result-meta { color: var(--muted); }
+.view-heading { flex-wrap: wrap; }
+.history-search-title { overflow-wrap: anywhere; }
