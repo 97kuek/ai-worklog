@@ -360,3 +360,31 @@ it("polls both terminal engines through running, waiting and completion without 
   expect((await poll()).sessions.map(s => s.id)).not.toContain(old.id);
   expect((await request("/api/sessions/" + old.id)).status).toBe(200);
 });
+
+it("loads current request defaults from history independently of board visibility", async () => {
+  const { request, upload, register, machine } = await setup();
+  const path = "/api/board/request-options";
+  const options = async () => {
+    const r = await request(path);
+    expect(r.headers.get("Cache-Control")).toBe("private, no-store");
+    return r.json<{ runnerProjects: string[]; recent: { project: string; tool: string; models: string[] }[];
+      available: { tool: string; models: string[] }[] }>();
+  };
+  expect((await request(path, machine)).status).toBe(403);
+  expect(await options()).toEqual({ runnerProjects: [], recent: [], available: [] });
+  const earlier = example.sessions[1]!;
+  await upload([earlier]);
+  await register("registered");
+  expect((await options()).recent).toMatchObject([{ project: earlier.project, models: earlier.models }]);
+  const later = { ...earlier, native_session_id: "later", ended_at: "2026-11-20T03:00:00Z",
+    models: ["new-model"], model_efforts: [{ model: "new-model", effort: "low" }] };
+  await upload([later, example.sessions[0]!]);
+  const latest = await options();
+  expect(latest.runnerProjects).toEqual(["registered"]);
+  expect(latest.recent).toMatchObject([
+    { project: earlier.project, tool: "codex", models: later.models, model_efforts: later.model_efforts },
+    { project: earlier.project, tool: "claude_code" },
+  ]);
+  expect(latest.available.filter(x => x.tool === "codex").flatMap(x => x.models).sort()).toEqual([...earlier.models, ...later.models].sort());
+  expect(await (await request("/api/board/updates")).json()).toMatchObject({ sessions: [{ tool: "claude_code" }] });
+});
