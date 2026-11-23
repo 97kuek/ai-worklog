@@ -11,6 +11,7 @@ interface Machine {
   online: boolean;
   seen_at: number | null;
   engines: string[];
+  log_received_at: Partial<Record<string, number>>;
   projects: { key: string; enabled: boolean }[];
   connection_test: ConnectionTest | null;
 }
@@ -24,6 +25,11 @@ interface Actions {
 }
 
 const stamp = new Intl.DateTimeFormat("en", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+const receiptStamp = new Intl.DateTimeFormat("en", {
+  year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit",
+  hourCycle: "h23", timeZoneName: "short",
+});
+const statusRefreshMs = 15_000;
 const testWindow = 90_000;
 
 function machinePanel(machine: Machine, actions: Actions, signal: AbortSignal) {
@@ -39,14 +45,33 @@ function machinePanel(machine: Machine, actions: Actions, signal: AbortSignal) {
 
   const testResult = el("p", "connection-result");
   testResult.setAttribute("role", "status");
-  const engineList = el("dl", "engine-status");
+  const engineList = el("table", "engine-status");
+  const headings = engineList.createTHead().insertRow();
+  for (const label of ["Engine", "Availability", "Last log received"]) {
+    const th = el("th", "", label);
+    th.scope = "col";
+    headings.append(th);
+  }
+  const body = engineList.createTBody();
   const showStatus = (m: Machine) => {
     status.textContent = m.seen_at === null ? "Runner has not connected yet"
       : (m.online ? "Online" : "Offline") + " · Last check-in " + stamp.format(m.seen_at);
-    engineList.replaceChildren();
+    body.replaceChildren();
     for (const key of ["claude_code", "codex"]) {
       const available = m.engines.includes(key) ? "Available" : m.seen_at === null ? "Unknown" : "Unavailable";
-      engineList.append(el("dt", "", engineName(key)), el("dd", "", available));
+      const row = body.insertRow();
+      const engine = el("th", "", engineName(key));
+      engine.scope = "row";
+      row.append(engine, el("td", "", available));
+      const receipt = row.insertCell();
+      const at = m.log_received_at[key];
+      if (at === undefined) {
+        receipt.textContent = "No receipt yet";
+      } else {
+        const time = el("time", "", receiptStamp.format(at));
+        time.dateTime = new Date(at).toISOString();
+        receipt.append(time);
+      }
     }
   };
   showStatus(machine);
@@ -124,7 +149,7 @@ function machinePanel(machine: Machine, actions: Actions, signal: AbortSignal) {
   const engines = el("section", "settings-group");
   engines.append(el("h3", "", "Engines"), engineList);
   panel.append(folders, engines);
-  return panel;
+  return { panel, showStatus };
 }
 
 export function renderSettings(root: HTMLElement, settings: RunnerSettings, actions: Actions, signal: AbortSignal) {
@@ -132,7 +157,35 @@ export function renderSettings(root: HTMLElement, settings: RunnerSettings, acti
   if (!settings.machines.length) {
     layout.append(el("h2", "", "Connect your first Mac"), el("p", "", "Sign in to Taskfolio on your Mac and install its runner to enable requests from the Board."));
   }
-  for (const m of settings.machines) layout.append(machinePanel(m, actions, signal));
+  let pending: Promise<RunnerSettings> | undefined;
+  const read = () => pending ??= actions.read().finally(() => { pending = undefined; });
+  const panels = new Map(settings.machines.map(machine => {
+    const { panel, showStatus } = machinePanel(machine, { ...actions, read }, signal);
+    layout.append(panel);
+    return [machine.id, showStatus] as const;
+  }));
+  if (panels.size) {
+    const warning = el("p", "machine-status");
+    warning.hidden = true;
+    warning.setAttribute("role", "status");
+    layout.append(warning);
+    const refresh = async () => {
+      if (document.hidden || signal.aborted) return;
+      try {
+        const latest = await read();
+        if (signal.aborted) return;
+        for (const machine of latest.machines) panels.get(machine.id)?.(machine);
+        warning.hidden = true;
+      } catch {
+        if (signal.aborted) return;
+        warning.textContent = "Could not refresh engine status. Retrying…";
+        warning.hidden = false;
+      }
+    };
+    const timer = window.setInterval(refresh, statusRefreshMs);
+    signal.addEventListener("abort", () => window.clearInterval(timer), { once: true });
+    document.addEventListener("visibilitychange", refresh, { signal });
+  }
 
   const guide = el("details", "settings-guide");
   guide.open = !settings.machines.some(m => m.projects.length);

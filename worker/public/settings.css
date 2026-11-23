@@ -18,7 +18,7 @@
 .runner-settings h3 { font-size: inherit; }
 .machine-panel, .settings-guide { border: 1px solid var(--line); border-radius: 12px; padding: clamp(16px, 3vw, 26px); }
 .machine-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
-.machine-status, .engine-status dd, .connection-result, .settings-guide p { color: var(--muted); }
+.machine-status, .connection-result, .settings-guide p { color: var(--muted); }
 .machine-header button { min-height: 44px; }
 .connection-result:empty, .settings-group .board-error:empty { display: none; }
 .machine-panel .connection-result:not(:empty) { margin-top: 8px; }
@@ -30,8 +30,12 @@
 .folder-row input:checked { background: var(--accent); border-color: var(--accent); }
 .folder-row input:checked::before { background: var(--white); transform: translateX(16px); }
 .folder-row input:disabled { opacity: .65; }
-.engine-status { display: grid; grid-template-columns: minmax(0,1fr) auto; margin: 0; gap: 8px 16px; }
-.engine-status dd { margin: 0; }
+.engine-status { width: 100%; border-collapse: collapse; }
+.engine-status th, .engine-status td { text-align: start; padding: 8px 8px 8px 0; vertical-align: top; }
+.engine-status thead th { color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--line-soft); }
+.engine-status tbody th { font-weight: 600; }
+.engine-status :is(th, td):last-child { padding-inline-end: 0; }
+.engine-status time { font-variant-numeric: tabular-nums; }
 .settings-guide summary { cursor: pointer; font-weight: 600; }
 .settings-guide p, .settings-guide code { margin-top: 12px; }
 .settings-guide code { display: block; background: var(--paper); padding: 10px 12px; border-radius: 6px; overflow-wrap: anywhere; }
