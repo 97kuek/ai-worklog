@@ -11,6 +11,7 @@ type Lane = typeof states[number];
 const dateFormat = new Intl.DateTimeFormat("en-US", {
   month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
 });
+const expandedMobileLanes = new Set(["Backlog", "Running"]);
 const pending = new WeakMap<HTMLElement, Map<string, Promise<void>>>();
 
 function updateTime(session: BoardSession): string {
@@ -171,6 +172,25 @@ export function renderBoard(
   drawSessions(sessions);
   const planning = planningLanes(plans, save, readOptions, { running: lanes.running, completed: lanes.completed });
   columns.append(...planning.sections, ...states.map(state => lanes[state].section));
+  for (const section of columns.querySelectorAll<HTMLElement>(".board-lane")) {
+    const heading = section.querySelector<HTMLElement>(".board-lane-heading")!;
+    const name = heading.firstChild!.textContent!.trim();
+    const toggle = el("button", "lane-toggle");
+    toggle.type = "button";
+    toggle.setAttribute("aria-label", name);
+    const setExpanded = (open: boolean) => {
+      toggle.setAttribute("aria-expanded", String(open));
+      section.classList.toggle("lane-collapsed", !open);
+    };
+    setExpanded(expandedMobileLanes.has(name));
+    toggle.onclick = () => {
+      const open = !expandedMobileLanes.has(name);
+      if (open) expandedMobileLanes.add(name);
+      else expandedMobileLanes.delete(name);
+      setExpanded(open);
+    };
+    heading.append(toggle);
+  }
   board.append(columns);
   root.replaceChildren(board);
   return async (read: () => Promise<BoardUpdates>) => {

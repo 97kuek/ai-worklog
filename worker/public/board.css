@@ -151,3 +151,17 @@
     .request-card[draggable="true"] .request-card-button:active { cursor: grabbing; }
   }
 }
+
+.lane-toggle { display: none; }
+@container (max-width: 600px) {
+  .board-lanes { gap: 0; }
+  .board-lane { border-top: 1px solid var(--line); padding-bottom: 8px; }
+  .board-lane.lane-collapsed { padding-bottom: 0; }
+  .board-lane-heading { position: relative; align-items: center; min-height: 48px; padding: 8px 32px 8px 2px; }
+  .lane-toggle {
+    display: block; position: absolute; inset: 0; width: 100%;
+    background: url("/icons/lucide/chevron-down.svg") no-repeat right 6px center / 18px;
+  }
+  .lane-toggle[aria-expanded="true"] { transform: scaleY(-1); }
+  .lane-collapsed > :not(.board-lane-heading) { display: none; }
+}

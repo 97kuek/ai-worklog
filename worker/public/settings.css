@@ -1,6 +1,17 @@
 .mast-actions { display: flex; align-items: center; gap: 8px; margin-inline-start: auto; }
 #open-settings[aria-current] { border-color: var(--accent); background: var(--paper); }
-@media (max-width: 1023px) { .mast-actions { margin-inline-start: 0; } }
+@media (max-width: 1023px) {
+  #mast-menu nav, .mast-actions { display: grid; gap: 0; }
+  #mast-menu nav a, .mast-actions .icon-button {
+    display: flex; align-items: center; justify-content: flex-start; min-height: 44px;
+  }
+  .mast-actions { margin: 4px 0 0; padding-top: 4px; border-top: 1px solid var(--line-soft); }
+  .mast-actions .icon-button {
+    width: 100%; margin: 0; padding-inline: 16px; gap: 10px; color: var(--ink);
+    text-decoration: none; border: 0;
+  }
+  .mast-actions span { display: inline; }
+}
 .runner-settings { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; }
 .runner-settings h2, .runner-settings h3, .runner-settings p { margin: 0; }
 .runner-settings h2 { font-size: var(--type-heading); overflow-wrap: anywhere; }
