@@ -3,7 +3,7 @@ import type { RequestOptions } from "./request-composer.js";
 import { planningLanes, type BoardRequest, type SaveRequest } from "./planning.js";
 import { countLabel, el, engineName, stateOf, statusLabel, titleOf, type Session } from "./shared.js";
 
-type BoardSession = Pick<Session, "id" | "tool" | "title" | "started_at" | "ended_at" | "observed_status" | "completed_at">;
+type BoardSession = Pick<Session, "id" | "tool" | "project" | "title" | "started_at" | "ended_at" | "observed_status" | "completed_at">;
 export interface BoardUpdates { sessions: BoardSession[]; requests: BoardRequest[] }
 
 const states = ["running", "waiting", "completed"] as const;

@@ -48,10 +48,9 @@ export function el<K extends keyof HTMLElementTagNameMap>(
   if (text !== undefined) node.textContent = text;
   return node;
 }
-export function titleOf(s: Pick<Session, "title" | "started_at">) {
+export function titleOf(s: Pick<Session, "title" | "project" | "tool">) {
   if (s.title?.trim()) return s.title.trim();
-  const started = new Date(s.started_at);
-  return "Task started " + monthDay.format(started) + " at " + clock.format(started);
+  return [s.project?.trim(), engineName(s.tool)].filter(Boolean).join(" · ");
 }
 export function countLabel(count: number, noun: string) {
   return count.toLocaleString("en-US") + " " + noun + (count === 1 ? "" : "s");

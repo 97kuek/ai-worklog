@@ -18,6 +18,7 @@ export function serializeBoardSession(s: BoardSessionRow) {
   return {
     id: s.id,
     tool: s.tool,
+    project: s.project,
     title: s.manual_title ?? s.title,
     observed_status: s.observed_at === null ? undefined : { state: s.observed_state, at: iso(s.observed_at) },
     completed_at: s.completed_at === null ? null : iso(s.completed_at),
@@ -37,7 +38,6 @@ export function serializeSession(s: SessionRow) {
   return {
     ...serializeBoardSession(s),
     manual_title: s.manual_title,
-    project: s.project,
     git_branch: s.git_branch,
     ...serializeModels(s),
     invoked_by: s.invoked_by,
