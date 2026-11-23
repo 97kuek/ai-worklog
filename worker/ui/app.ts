@@ -390,7 +390,7 @@ function toggleMenu(open: boolean) {
 }
 menu.onclick = () => toggleMenu(menu.getAttribute("aria-expanded") !== "true");
 mast.addEventListener("click", (e) => {
-  if (e.target instanceof Element && e.target.closest("nav a, .brand")) toggleMenu(false);
+  if (e.target instanceof Element && e.target.closest("nav a, #open-settings, .brand")) toggleMenu(false);
 });
 document.addEventListener("keydown", (event) => {
   if (!event.metaKey && !event.ctrlKey && !event.altKey) document.documentElement.dataset.input = "keyboard";
@@ -409,7 +409,13 @@ mast.addEventListener("keydown", (e) => {
   }
 });
 window.matchMedia("(max-width: 1023px)").addEventListener("change", () => toggleMenu(false));
-node("refresh").onclick = () => void load();
+node("refresh").onclick = () => {
+  if (menu.getAttribute("aria-expanded") === "true") {
+    toggleMenu(false);
+    menu.focus();
+  }
+  void load();
+};
 document.querySelector<HTMLAnchorElement>(".skip")?.addEventListener("click", (e) => {
   e.preventDefault();
   node("main").focus();

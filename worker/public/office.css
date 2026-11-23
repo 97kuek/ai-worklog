@@ -183,3 +183,10 @@
   .office-viewport { aspect-ratio: 1.33; }
   .office-control, .office-reset { min-height: 44px; }
 }
+
+@media (max-width: 600px) {
+  .office-layout { gap: 12px; }
+  .office-toolbar { justify-content: flex-end; min-height: 44px; padding-top: 0; }
+  .office-layout:not([data-scene="ready"]) .office-toolbar, .office-hint { display: none; }
+  .office-roster-head { padding-bottom: 8px; }
+}
