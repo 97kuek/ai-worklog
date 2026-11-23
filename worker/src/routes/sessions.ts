@@ -2,7 +2,7 @@ import { completedBoardWindow } from "../../ui/board-retention";
 import type { Hono } from "hono";
 import type { AppEnv } from "../app";
 import { listRequests, listRunnerProjects } from "../db/launches";
-import { completeSession, findSession, listBoardSessions, listVisibleBoardSessions, readComposerHistory, saveSessions, setManualTitle } from "../db/repo";
+import { completeSession, detailETag, readDetailETag, findSession, listBoardSessions, listVisibleBoardSessions, readComposerHistory, saveSessions, setManualTitle } from "../db/repo";
 import { LIMITS, parseIngestPayload } from "../domain/ingest";
 import { serializeBlock, serializeBoardSession, serializeModels, serializeSession } from "./serialize";
 
@@ -94,12 +94,19 @@ export function registerSessionRoutes(app: Hono<AppEnv>, now: () => number): voi
     const principal = c.get("principal");
     if (principal.kind !== "user") return c.json({ error: "forbidden" }, 403);
 
-    const { session, blocks } = await findSession(c.env.DB, principal.userId, c.req.param("id"));
+    const id = c.req.param("id");
+    const known = c.req.header("If-None-Match");
+    if (known) {
+      const tag = await readDetailETag(c.env.DB, principal.userId, id);
+      if (!tag) return c.json({ error: "not_found" }, 404);
+      if (known === tag) return c.body(null, 304, { ETag: tag, "Cache-Control": "private, no-store" });
+    }
+    const { session, blocks } = await findSession(c.env.DB, principal.userId, id);
     if (!session) return c.json({ error: "not_found" }, 404);
     return c.json(
       { session: serializeSession(session), blocks: blocks.map(serializeBlock) },
       200,
-      { "Cache-Control": "private, no-store" },
+      { ETag: detailETag(session), "Cache-Control": "private, no-store" },
     );
   });
 

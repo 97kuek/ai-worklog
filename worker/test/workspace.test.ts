@@ -388,3 +388,36 @@ it("loads current request defaults from history independently of board visibilit
   expect(latest.available.filter(x => x.tool === "codex").flatMap(x => x.models).sort()).toEqual([...earlier.models, ...later.models].sort());
   expect(await (await request("/api/board/updates")).json()).toMatchObject({ sessions: [{ tool: "claude_code" }] });
 });
+
+it("skips unchanged task details, including after identical uploads", async () => {
+  const { request, upload, board, post, machine } = await setup();
+  const initial = example.sessions[0]!;
+  await upload([initial]);
+  const path = "/api/sessions/" + (await board()).sessions[0]!.id;
+  let tag = (await request(path)).headers.get("ETag")!;
+  expect(tag).toBeTruthy();
+  const conditional = () => request(path, undefined, { headers: { "If-None-Match": tag } });
+  const changed = async () => {
+    const r = await conditional();
+    expect(r.status).toBe(200);
+    expect(r.headers.get("ETag")).not.toBe(tag);
+    tag = r.headers.get("ETag")!;
+    return r.json<{ blocks: { message_count: number }[] }>();
+  };
+  await upload([initial]);
+  const same = await conditional();
+  expect(same.status).toBe(304);
+  expect(await same.text()).toBe("");
+  expect((await request(path, machine, { headers: { "If-None-Match": tag } })).status).toBe(403);
+  const edited = { ...initial, blocks: initial.blocks.map(b => ({ ...b, message_count: b.message_count + 1 })) };
+  await upload([edited]);
+  expect((await changed()).blocks[0]!.message_count).toBe(edited.blocks[0]!.message_count);
+  const shorter = { ...edited, blocks: edited.blocks.slice(0, 1) };
+  await upload([shorter]);
+  expect((await changed()).blocks).toHaveLength(1);
+  await upload([shorter], "Renamed Mac");
+  await changed();
+  expect((await request(path + "/complete", undefined, post)).status).toBe(200);
+  await changed();
+  expect((await conditional()).status).toBe(304);
+});

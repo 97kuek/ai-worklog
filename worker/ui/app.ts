@@ -94,7 +94,7 @@ const root = node("view"),
 const focusMain = () => node("main").focus({ preventScroll: true });
 let opener: HTMLElement | null = null;
 
-async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
+async function apiResponse(path: string, options: RequestInit = {}) {
   const res = await fetch(path, {
     ...options,
     headers: { Accept: "application/json", ...options.headers },
@@ -108,10 +108,14 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
       ? "This task has changed. Reopen it to see the latest version." : "The server could not accept this request."));
   }
   if (res.status === 404) throw new Error("Task not found.");
+  if (res.status === 304) return res;
   if (!res.ok) throw new Error("Could not load records from the server.");
   if (!res.headers.get("content-type")?.includes("application/json"))
     throw new Error("Sign in and reload this page.");
-  return res.json() as Promise<T>;
+  return res;
+}
+async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
+  return (await apiResponse(path, options)).json() as Promise<T>;
 }
 function message(e: unknown) {
   return e instanceof Error && e.name !== "TypeError"
@@ -170,32 +174,37 @@ async function showDetail(id: string, block?: Block) {
     return result.session;
   }
   let busy = false;
-  let previous = "";
+  let tag: string | null = null;
+  let current: Session | undefined;
   let titleVersion = "";
   async function update() {
     if (busy || controller.signal.aborted || !dialog.open) return;
     busy = true;
     const revision = savedRevision;
     try {
-      const data = await api<{ session: Session; blocks: Block[] }>(path, { signal: controller.signal });
-      if (controller.signal.aborted || !dialog.open) return;
-      const { session, blocks } = data;
-      const title = JSON.stringify([session.title, session.manual_title]);
-      if (titleVersion !== title && savedRevision === revision && !heading.querySelector("form")) {
-        editTaskTitle(heading, session, saveTitle);
-        titleVersion = title;
-      }
-      const snapshot = JSON.stringify(data);
-      if (snapshot !== previous) {
+      const response = await apiResponse(path, {
+        signal: controller.signal,
+        headers: tag ? { "If-None-Match": tag } : {},
+      });
+      if (response.status !== 304) {
+        const { session, blocks } = await response.json() as { session: Session; blocks: Block[] };
+        if (controller.signal.aborted || !dialog.open) return;
         const expanded = content.querySelector("details")?.open;
         const focused = document.activeElement?.matches("summary") && content.contains(document.activeElement);
         renderDetail(content, session, blocks, block, view === "board");
         const details = content.querySelector("details");
         if (expanded && details) details.open = true;
         if (focused) details?.querySelector("summary")?.focus({ preventScroll: true });
-        previous = snapshot;
+        current = session;
+        tag = response.headers.get("ETag");
+        move.hidden = view !== "board" || session.observed_status?.state !== "waiting" || Boolean(session.completed_at);
       }
-      move.hidden = view !== "board" || session.observed_status?.state !== "waiting" || Boolean(session.completed_at);
+      if (controller.signal.aborted || !dialog.open || !current) return;
+      const title = JSON.stringify([current.title, current.manual_title]);
+      if (titleVersion !== title && savedRevision === revision && !heading.querySelector("form")) {
+        editTaskTitle(heading, current, saveTitle);
+        titleVersion = title;
+      }
       if (!completing) move.disabled = false;
       if (problem.dataset.refreshError) {
         problem.textContent = "";
@@ -203,7 +212,7 @@ async function showDetail(id: string, block?: Block) {
       }
     } catch (e) {
       if (controller.signal.aborted || !dialog.open) return;
-      if (!previous) {
+      if (!current) {
         showTitle(heading, "Task details");
         content.replaceChildren(errorBox(e, () => void update()));
       } else {
