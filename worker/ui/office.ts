@@ -102,7 +102,7 @@ class OfficeView {
   private scene?: OfficeScene;
   private controller?: AbortController;
   private page = 0;
-  private pages = 1;
+  private rooms = [0];
   private open: OpenTask;
   private listSignature?: string;
 
@@ -199,7 +199,7 @@ class OfficeView {
   }
 
   private changeRoom(direction: number) {
-    this.page = Math.max(0, Math.min(this.pages - 1, this.page + direction));
+    this.page = this.rooms[this.rooms.indexOf(this.page) + direction] ?? this.page;
     this.draw();
     if (this.previous.disabled) this.next.focus();
     if (this.next.disabled) this.previous.focus();
@@ -207,10 +207,12 @@ class OfficeView {
 
   update(sessions: Session[], open: OpenTask) {
     this.open = open;
-    this.seats = assignDesks(this.seats, sessions, this.pages);
+    this.seats = assignDesks(this.seats, sessions);
     rememberSeats(this.seats);
     this.tasks = new Map(sessions.filter(s => this.seats.has(s.id)).map(s => [s.id, s]));
-    for (const seat of this.seats.values()) this.pages = Math.max(this.pages, Math.floor(seat / desksPerRoom) + 1);
+    this.rooms = [...new Set(Array.from(this.seats.values(), seat => Math.floor(seat / desksPerRoom)))].sort((a, b) => a - b);
+    if (!this.rooms.length) this.rooms.push(this.page);
+    if (!this.rooms.includes(this.page)) this.page = this.rooms[0];
     this.draw(this.settleNextPoll || document.hidden);
     this.settleNextPoll = document.hidden;
   }
@@ -244,10 +246,11 @@ class OfficeView {
     }
     this.summary.textContent = count ? "No tasks running in this room." : "No tasks running.";
     this.summary.hidden = seats.some(Boolean);
-    this.paging.hidden = this.pages < 2;
-    this.roomLabel.textContent = "Room " + (this.page + 1) + " of " + this.pages;
-    this.previous.disabled = this.page === 0;
-    this.next.disabled = this.page === this.pages - 1;
+    const position = this.rooms.indexOf(this.page);
+    this.paging.hidden = this.rooms.length < 2;
+    this.roomLabel.textContent = "Room " + (position + 1) + " of " + this.rooms.length;
+    this.previous.disabled = position === 0;
+    this.next.disabled = position === this.rooms.length - 1;
     this.scene?.setSeats(seats, this.page, settle);
     if (signature === this.listSignature) return;
     this.listSignature = signature;
