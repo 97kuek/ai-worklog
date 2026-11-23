@@ -69,6 +69,15 @@ const blockAssignments = BLOCK_COLUMNS.map((c) => `${c} = excluded.${c}`).join("
 const blockDiffers = BLOCK_COLUMNS.map((c) => `blocks.${c} IS NOT excluded.${c}`).join(" OR ");
 
 const newerObservation = "excluded.observed_at IS NOT NULL AND (sessions.observed_at IS NULL OR excluded.observed_at > sessions.observed_at)";
+// A block-only edit (including a shorter history) also changes the task detail.
+const blockFields = BLOCK_COLUMNS.filter(c => c !== "user_id");
+const storedBlockValues = `(SELECT json_group_array(json_array(${blockFields.join(",")}) ORDER BY seq)
+  FROM blocks WHERE session_id = sessions.id)`;
+
+function blockValues(b: IngestPayload["sessions"][number]["blocks"][number]) {
+  return [b.started_at, b.ended_at, b.message_count, b.tokens.input, b.tokens.output, b.tokens.cache_read, b.tokens.cache_write];
+}
+
 const SESSION_ID = "(SELECT id FROM sessions WHERE user_id = ? AND tool = ? AND native_session_id = ?)";
 
 /**
@@ -94,8 +103,8 @@ export async function saveSessions(
            ON CONFLICT (user_id, tool, native_session_id) DO UPDATE SET ${sessionAssignments},
              observed_state = CASE WHEN ${newerObservation} THEN excluded.observed_state ELSE sessions.observed_state END,
              observed_at = CASE WHEN ${newerObservation} THEN excluded.observed_at ELSE sessions.observed_at END,
-             updated_at = excluded.updated_at
-           WHERE ${sessionDiffers} OR (${newerObservation})`,
+             updated_at = MAX(sessions.updated_at + 1, excluded.updated_at)
+           WHERE ${sessionDiffers} OR (${newerObservation}) OR ${storedBlockValues} <> ?`,
         )
         .bind(
           crypto.randomUUID(),
@@ -118,6 +127,7 @@ export async function saveSessions(
           s.observed_status?.state ?? null,
           s.observed_status?.at ?? null,
           now,
+          JSON.stringify(s.blocks.map(blockValues)),
         ),
     );
   }
@@ -136,13 +146,7 @@ export async function saveSessions(
             ...key,
             b.seq,
             p.userId,
-            b.started_at,
-            b.ended_at,
-            b.message_count,
-            b.tokens.input,
-            b.tokens.output,
-            b.tokens.cache_read,
-            b.tokens.cache_write,
+            ...blockValues(b),
           ),
       );
     }
@@ -169,6 +173,7 @@ export type SessionRow = {
   model_efforts: string | null;
   invoked_by: string | null;
   machine_name: string | null;
+  updated_at: number;
   observed_state: ObservedStatus["state"] | null;
   observed_at: number | null;
   completed_at: number | null;
@@ -197,7 +202,7 @@ export type BlockRow = {
 // same native session, including rows completed before this rule was introduced.
 const currentCompletion = "CASE WHEN s.observed_at IS NULL OR s.observed_at <= s.completed_at THEN s.completed_at END";
 const SELECT_SESSION = `SELECT s.id, s.tool, s.title, s.manual_title, s.project, s.git_branch, s.models, s.model_efforts, s.invoked_by,
-    m.name AS machine_name, s.started_at, s.ended_at, s.active_minutes,
+    m.name AS machine_name, s.updated_at, s.started_at, s.ended_at, s.active_minutes,
     s.observed_state, s.observed_at, ${currentCompletion} AS completed_at,
     s.input_tokens, s.output_tokens, s.cache_read_tokens, s.cache_write_tokens
   FROM sessions s JOIN machines m ON m.id = s.machine_id AND m.user_id = s.user_id`;
@@ -244,6 +249,20 @@ export async function readComposerHistory(db: D1Database, user: string) {
   };
 }
 
+type DetailVersion = Pick<SessionRow, "id" | "updated_at" | "machine_name">;
+
+export function detailETag(row: DetailVersion) {
+  // A rename of the machine can change the detail without updating the session.
+  return '"detail-v1-' + row.id + '-' + row.updated_at + '-' + encodeURIComponent(JSON.stringify(row.machine_name)) + '"';
+}
+
+export async function readDetailETag(db: D1Database, user: string, id: string) {
+  const row = await db.prepare(`SELECT s.id, s.updated_at, m.name AS machine_name FROM sessions s
+    JOIN machines m ON m.id=s.machine_id AND m.user_id=s.user_id WHERE s.user_id=? AND s.id=?`)
+    .bind(user, id).first<DetailVersion>();
+  return row ? detailETag(row) : null;
+}
+
 export async function findSession(db: D1Database, userId: string, id: string) {
   const [session, blocks] = await db.batch([
     sessionById(db, userId, id),
@@ -261,7 +280,7 @@ export async function setManualTitle(
   now: number,
 ) {
   const [, session] = await db.batch<SessionRow>([
-    db.prepare(`UPDATE sessions SET manual_title = ?, updated_at = MAX(updated_at, ?)
+    db.prepare(`UPDATE sessions SET manual_title = ?, updated_at = MAX(updated_at + 1, ?)
       WHERE user_id = ? AND id = ? AND manual_title IS ? AND manual_title IS NOT ?`)
       .bind(title, now, userId, id, expected, title),
     sessionById(db, userId, id),
@@ -272,7 +291,7 @@ export async function setManualTitle(
 export async function completeSession(db: D1Database, userId: string, id: string, now: number) {
   // The condition and the returned row share a transaction with respect to racing uploads/retries.
   const [, session] = await db.batch<SessionRow>([
-    db.prepare(`UPDATE sessions AS s SET completed_at = MAX(?, observed_at), updated_at = MAX(updated_at, ?)
+    db.prepare(`UPDATE sessions AS s SET completed_at = MAX(?, observed_at), updated_at = MAX(updated_at + 1, ?)
       WHERE user_id = ? AND id = ? AND observed_state = 'waiting' AND (${currentCompletion}) IS NULL`)
       .bind(now, now, userId, id),
     sessionById(db, userId, id),
