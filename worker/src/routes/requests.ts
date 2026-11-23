@@ -12,13 +12,14 @@ function queueValidation(user: string, stage: string, settings?: [string | null,
   const choice = settings ? "SELECT ?,?" : "SELECT board_requests.project,board_requests.engine";
   return {
     sql: `(WITH choice(project,engine) AS (${choice}), registered AS (
-      SELECT p.engines FROM runner_projects p JOIN machines m ON m.id=p.machine_id, choice
-      WHERE m.user_id=? AND p.enabled=1 AND p.project=choice.project
+      SELECT p.engines,p.enabled FROM runner_projects p JOIN machines m ON m.id=p.machine_id, choice
+      WHERE m.user_id=? AND p.project=choice.project
     ) SELECT CASE
       WHEN choice.project IS NULL THEN 'project_required'
       WHEN choice.engine IS NULL THEN 'engine_required'
       WHEN NOT EXISTS (SELECT 1 FROM registered) THEN 'project_unregistered'
-      WHEN NOT EXISTS (SELECT 1 FROM registered, json_each(registered.engines) e WHERE e.value=choice.engine)
+      WHEN NOT EXISTS (SELECT 1 FROM registered WHERE enabled=1) THEN 'project_paused'
+      WHEN NOT EXISTS (SELECT 1 FROM registered, json_each(registered.engines) e WHERE enabled=1 AND e.value=choice.engine)
         THEN 'engine_unavailable'
     END FROM choice)`,
     args: [...(settings ?? []), user],
