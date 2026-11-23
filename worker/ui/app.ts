@@ -21,7 +21,7 @@ import { renderStats } from "./stats.js";
 import { renderSettings, type RunnerSettings } from "./settings.js";
 import { renderSkills, type Skill } from "./skills.js";
 
-const pages = { log: "Work log", calendar: "Calendar", board: "Board", stats: "Activity", usage: "Usage", skills: "Skills", office: "Office", settings: "Settings", help: "使い方", "help/mac": "Mac のセットアップ" };
+const pages = { log: "Work log", calendar: "Calendar", board: "Board", stats: "Activity", usage: "Usage", skills: "Skills", office: "Office", settings: "Settings" };
 type View = keyof typeof pages;
 function node<T extends HTMLElement>(id: string) {
   return document.getElementById(id) as T;
@@ -200,15 +200,11 @@ async function complete(id: string) {
 function hasDateRange() {
   return view === "log" || view === "calendar" || view === "stats";
 }
-function isHelp() {
-  return view === "help" || view === "help/mac";
-}
 function syncHead() {
   document.title = pages[view] + " | Taskfolio";
   node("title").textContent = pages[view];
-  node("title").lang = isHelp() ? "ja" : "en";
-  for (const a of document.querySelectorAll<HTMLAnchorElement>("#main-nav a, .mast-actions a")) {
-    if (a.hash === "#" + view || (a.id === "open-help" && isHelp())) a.setAttribute("aria-current", "page");
+  for (const a of document.querySelectorAll<HTMLAnchorElement>("nav a, #open-settings")) {
+    if (a.hash === "#" + view) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   }
   node("week-controls").hidden = !hasDateRange();
@@ -254,12 +250,9 @@ async function load(done = "") {
     displayedScope = undefined;
     root.replaceChildren();
   }
-  if (!(liveView() && displayedScope === scope)) notice.textContent = isHelp() ? "" : "Loading…";
+  if (!(liveView() && displayedScope === scope)) notice.textContent = "Loading…";
   try {
-    if (isHelp()) {
-      const template = node<HTMLTemplateElement>(view === "help" ? "guide-overview" : "guide-mac");
-      root.replaceChildren(template.content.cloneNode(true));
-    } else if (view === "office") {
+    if (view === "office") {
       const [module, data] = await Promise.all([
         import("./office.js"),
         api<{ sessions: Session[] }>("/api/board?status=running", { signal: controller.signal }),
@@ -353,7 +346,7 @@ function toggleMenu(open: boolean) {
 }
 menu.onclick = () => toggleMenu(menu.getAttribute("aria-expanded") !== "true");
 mast.addEventListener("click", (e) => {
-  if (e.target instanceof Element && e.target.closest("a")) toggleMenu(false);
+  if (e.target instanceof Element && e.target.closest("nav a, .brand")) toggleMenu(false);
 });
 document.addEventListener("keydown", (event) => {
   if (!event.metaKey && !event.ctrlKey && !event.altKey) document.documentElement.dataset.input = "keyboard";
@@ -379,14 +372,12 @@ document.querySelector<HTMLAnchorElement>(".skip")?.addEventListener("click", (e
 });
 window.addEventListener("hashchange", () => {
   toggleMenu(false);
-  const wasHelp = isHelp();
   if (view === "office" && route() !== "office") officeModule?.disposeOffice();
   view = route();
   if (dialog.open) dialog.close();
   if (picker.open) picker.close();
   void load();
   focusMain();
-  if (wasHelp || isHelp()) window.scrollTo(0, 0);
 });
 document.addEventListener("visibilitychange", () => {
   if (liveView()) {

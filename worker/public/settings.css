@@ -1,16 +1,6 @@
 .mast-actions { display: flex; align-items: center; gap: 8px; margin-inline-start: auto; }
-.mast-actions a[aria-current] { border-color: var(--accent); background: var(--paper); }
+#open-settings[aria-current] { border-color: var(--accent); background: var(--paper); }
 @media (max-width: 1023px) { .mast-actions { margin-inline-start: 0; } }
-@media (min-width: 1024px) and (max-width: 1120px) {
-  .mast-inner { gap: 16px; }
-  #main-nav a { padding-inline: 12px; }
-}
-@media (max-width: 380px) {
-  .mast-inner, .mast-actions { gap: 4px; }
-}
-@media (max-width: 350px) {
-  .brand-name { display: none; }
-}
 .runner-settings { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; }
 .runner-settings h2, .runner-settings h3, .runner-settings p { margin: 0; }
 .runner-settings h2 { font-size: var(--type-heading); overflow-wrap: anywhere; }
@@ -32,19 +22,5 @@
 .engine-status { display: grid; grid-template-columns: minmax(0,1fr) auto; margin: 0; gap: 8px 16px; }
 .engine-status dd { margin: 0; }
 .settings-guide summary { cursor: pointer; font-weight: 600; }
-.settings-guide p, .settings-guide code, .settings-guide a { margin-top: 12px; }
+.settings-guide p, .settings-guide code { margin-top: 12px; }
 .settings-guide code { display: block; background: var(--paper); padding: 10px 12px; border-radius: 6px; overflow-wrap: anywhere; }
-.settings-guide a { display: inline-block; color: var(--accent); }
-.help-guide { display: grid; gap: 16px; line-height: 1.75; overflow-wrap: anywhere; }
-.help-guide section, .guide-switch { border: 1px solid var(--line); border-radius: 12px; padding: clamp(16px, 3vw, 26px); }
-.guide-switch { background: var(--paper); }
-.guide-switch p, .help-guide h2 { margin: 0; }
-.help-guide h2 { font-size: var(--type-heading); }
-.help-guide :is(p, ol, dl, pre) { max-width: 78ch; }
-.help-guide :is(p, ol, dl, pre):last-child { margin-bottom: 0; }
-.help-guide ol { padding-inline-start: 1.6em; }
-.help-guide li + li, .help-guide dt:not(:first-child) { margin-top: .8em; }
-.help-guide dt { font-weight: 600; }
-.help-guide dd { margin: .15em 0 0; }
-.help-guide pre { padding: 12px; background: var(--surface-soft); border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.55; font-size: .9rem; }
-.help-guide a { text-underline-offset: .2em; }
