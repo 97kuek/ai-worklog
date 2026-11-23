@@ -41,12 +41,9 @@ function seriesTime(bucket: ActivityBucket, series: ProjectSeries) {
 
 function projectPie(bucket: ActivityBucket, series: ProjectSeries[]) {
   if (!bucket.ms) return el("p", "stats-empty-hour", "No active time in this period.");
-  const figure = el("figure", "project-share");
   const pie = el("div", "project-pie");
-  // The adjacent legend gives the exact value and share of every slice in reading order.
+  // The project table gives the exact values in reading order.
   pie.setAttribute("aria-hidden", "true");
-  const legend = el("ul", "share-legend");
-  legend.setAttribute("aria-label", "Project shares of active time");
   let elapsed = 0;
   for (const group of series) {
     const ms = seriesTime(bucket, group);
@@ -56,23 +53,25 @@ function projectPie(bucket: ActivityBucket, series: ProjectSeries[]) {
     const slice = el("span", "series-" + group.style);
     slice.style.maskImage = `conic-gradient(transparent 0 ${start}turn, black ${start}turn ${elapsed / bucket.ms}turn, transparent 0)`;
     pie.append(slice);
-    const item = el("li");
-    const swatch = el("span", "stats-swatch series-" + group.style);
-    swatch.setAttribute("aria-hidden", "true");
-    item.append(swatch, el("span", "", group.name), el("strong", "", duration(ms)),
-      el("span", "share-percent", percentage(ms, bucket.ms)));
-    legend.append(item);
   }
-  figure.append(pie, legend);
-  return figure;
+  return pie;
 }
 
-function projectTable(bucket: ActivityBucket) {
+function projectTable(bucket: ActivityBucket, series: ProjectSeries[]) {
   const table = dataTable("stats-table project-table", "Project activity", ["Project", "Active time", "Share", "Tasks"]);
   const body = table.createTBody();
   for (const [key, entry] of rankedProjects(bucket)) {
     const row = body.insertRow();
-    row.insertCell().textContent = projectName(key);
+    const group = series.find(group => group.keys.includes(key))!;
+    const swatch = el("span", "stats-swatch series-" + group.style);
+    swatch.setAttribute("aria-hidden", "true");
+    const name = el("span", "project-key");
+    name.append(swatch, projectName(key));
+    if (group.keys.length > 1 || group.style === 4) {
+      name.title = group.name;
+      name.setAttribute("aria-label", projectName(key) + " (" + group.name + ")");
+    }
+    row.insertCell().append(name);
     row.insertCell().textContent = duration(entry.ms);
     row.insertCell().textContent = percentage(entry.ms, bucket.ms);
     row.insertCell().textContent = String(entry.tasks.size);
@@ -186,9 +185,8 @@ export function renderStats(root: HTMLElement, data: WeekData, start: Date, end:
   const selection = el("p", "stats-selection");
   selection.setAttribute("role", "status");
   const projects = el("section", "stats-detail");
-  const pieResults = el("div");
-  const projectResults = el("div");
-  projects.append(el("h3", "", "Project share of active time"), pieResults, projectResults);
+  const projectResults = el("div", "project-share");
+  projects.append(el("h3", "", "Project share of active time"), projectResults);
   const models = el("section", "stats-detail");
   const results = el("div", "stats-table-scroll");
   models.append(el("h3", "", "Model usage"), results);
@@ -202,8 +200,7 @@ export function renderStats(root: HTMLElement, data: WeekData, start: Date, end:
     const scope = weekly ? "across all days this week" : "on this day";
     const range = bucket ? hourLabels[Number(value)] : "All hours";
     selection.textContent = range + " " + scope + " · " + duration(selected.ms) + " active";
-    pieResults.replaceChildren(projectPie(selected, series));
-    projectResults.replaceChildren(...(selected.projects.size ? [projectTable(selected)] : []));
+    projectResults.replaceChildren(projectPie(selected, series), ...(selected.projects.size ? [projectTable(selected, series)] : []));
     const counts = stats.modelCounts(selected.tasks);
     if (!counts.length) {
       results.replaceChildren(el("p", "stats-empty-hour", bucket ? "No work blocks in this hour." : "No work blocks in this period."));
