@@ -371,7 +371,7 @@ it("loads current request defaults from history independently of board visibilit
       available: { tool: string; models: string[] }[] }>();
   };
   expect((await request(path, machine)).status).toBe(403);
-  expect(await options()).toEqual({ runnerProjects: [], recent: [], available: [] });
+  expect(await options()).toEqual({ runnerProjects: [], pausedProjects: [], recent: [], available: [] });
   const earlier = example.sessions[1]!;
   await upload([earlier]);
   await register("registered");

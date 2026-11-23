@@ -61,7 +61,7 @@ export function registerSessionRoutes(app: Hono<AppEnv>, now: () => number): voi
       listRequests(c.env.DB, principal.userId, time),
       listRunnerProjects(c.env.DB, principal.userId),
     ]);
-    return c.json({ ...board, requests, runnerProjects: projects.length ? projects : undefined }, 200, headers);
+    return c.json({ ...board, requests, runnerProjects: projects.enabled.length ? projects.enabled : undefined }, 200, headers);
   });
 
   app.get("/api/board/request-options", async c => {
@@ -72,7 +72,8 @@ export function registerSessionRoutes(app: Hono<AppEnv>, now: () => number): voi
       listRunnerProjects(c.env.DB, principal.userId),
     ]);
     return c.json({
-      runnerProjects,
+      runnerProjects: runnerProjects.enabled,
+      pausedProjects: runnerProjects.paused,
       recent: history.recent.map(s => ({ tool: s.tool, project: s.project, ...serializeModels(s) })),
       available: history.available.map(s => ({ tool: s.tool, ...serializeModels(s) })),
     }, 200, { "Cache-Control": "private, no-store" });

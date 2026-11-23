@@ -19,6 +19,7 @@ export interface RequestOptions {
   recent: (EngineSettings & { project: string })[];
   available: EngineSettings[];
   runnerProjects: string[];
+  pausedProjects?: string[];
 }
 
 export function requestComposer(
@@ -91,7 +92,7 @@ export function requestComposer(
       }
     }
     void loadOptions();
-    function initialize({ recent, available, runnerProjects }: RequestOptions) {
+    function initialize({ recent, available, runnerProjects, pausedProjects = [] }: RequestOptions) {
       const fields: RequestFields = {
         title: field.value, engine: original?.engine ?? null, model: original?.model ?? null,
         effort: original?.effort ?? null, project: original?.project ?? null,
@@ -148,6 +149,7 @@ export function requestComposer(
       function selectProject(project: string | null) {
         if (fields.project === project) return;
         fields.project = project;
+        pausedHint.hidden = !project || !paused.has(project);
         fields.engine = project ? recent.find(s => s.project === project && (s.tool === "claude_code" || s.tool === "codex"))?.tool ?? null : null;
         inheritModel();
         renderEngine();
@@ -161,7 +163,10 @@ export function requestComposer(
       }
       const knownProjects = [...recent, ...requests()].flatMap(s => s.project ? [s.project] : []);
       const registered = new Set(runnerProjects);
-      const projects = [...new Set([...runnerProjects, ...(stage === "backlog" ? knownProjects : []),
+      const paused = new Set(pausedProjects);
+      const pausedHint = el("small", "project-paused-hint", "Enable this working folder in Settings to queue requests.");
+      pausedHint.hidden = !fields.project || !paused.has(fields.project);
+      const projects = [...new Set([...runnerProjects, ...(stage === "backlog" ? [...paused, ...knownProjects] : []),
         ...(original?.project ? [original.project] : [])])].sort();
       const projectField = el("div", "request-choice");
       const projectLabel = el("label", "", "Project (required)");
@@ -178,10 +183,10 @@ export function requestComposer(
       projectField.append(projectLabel);
       const projectControl = el("div", "project-control");
       projectControl.append(projectInput);
-      projectField.append(projectControl);
+      projectField.append(projectControl, pausedHint);
       let projectFocus: HTMLElement = projectInput;
       if (projects.length || stage === "queued") {
-        const options: [string, string][] = projects.map(p => ["project:" + p, registered.has(p) ? p : p + " (unregistered)"]);
+        const options: [string, string][] = projects.map(p => ["project:" + p, registered.has(p) ? p : p + (paused.has(p) ? " (Paused)" : " (unregistered)")]);
         if (stage === "backlog") options.push(["new", "New project…"]);
         const menu = filterMenu("request-project", "Project", [
           ["", "Select project"], ...options,

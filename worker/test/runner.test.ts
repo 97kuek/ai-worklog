@@ -428,13 +428,17 @@ it("applies per-Mac project switches to queue validation, board choices, manual 
   const auto = () => s.call("/api/runner/claim", s.mac, "PUT", {...capabilities, auto_queue: true});
   expect((await switchProject(false)).status).toBe(200);
   expect((await switchProject(false)).status).toBe(200);
+  const choices = async () => (await s.call("/api/board/request-options", s.user, "GET")).json();
+  expect(await choices()).toMatchObject({ runnerProjects: [], pausedProjects: ["demo"] });
+  expect((await s.board()).requests[0]).toMatchObject({ wait_reason: "project_paused" });
   await s.claim(s.mac, {projects: [], engines: []});
   expect(await (await auto()).json()).toEqual({job: null});
   expect(await (await s.start(crypto.randomUUID())).json()).toEqual({error: "runner_unavailable"});
   expect(await (await s.call("/api/board", s.user, "GET")).json()).not.toHaveProperty("runnerProjects");
   expect((await s.put({stage: "backlog"})).status).toBe(200);
-  expect(await (await s.put({stage: "queued"})).json()).toEqual({error: "project_unregistered"});
+  expect(await (await s.put({stage: "queued"})).json()).toEqual({error: "project_paused"});
   await s.claim(s.otherMac, {projects: ["demo"], engines: ["claude_code"]});
+  expect(await choices()).toMatchObject({ runnerProjects: ["demo"], pausedProjects: [] });
   expect(await (await s.put({stage: "queued"})).json()).toEqual({error: "engine_unavailable"});
   expect((await switchProject(true)).status).toBe(200);
   expect((await s.put({stage: "queued"})).status).toBe(200);

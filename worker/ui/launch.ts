@@ -1,7 +1,10 @@
+const pausedProject = "Project paused. Enable its working folder in Settings.";
+
 export const queueWaitLabels = {
   waiting_for_mac: "Waiting for Mac",
   mac_busy: "Mac is busy",
   next_poll: "Waiting for next check-in",
+  project_paused: pausedProject,
   check_settings: "Check project and engine in Settings",
 } as const;
 
@@ -15,6 +18,7 @@ export const requestErrorMessages: Record<string, string> = {
   launch_conflict: "The Mac has already picked up this request. Refresh the board to see its status.",
   engine_required: "Edit this request and select an engine before queuing it.",
   project_required: "Select a project for this request.",
+  project_paused: pausedProject,
   project_unregistered: "Select a project registered on the Mac before queuing this request.",
   engine_unavailable: "The registered Mac does not support this engine for the selected project.",
 };
