@@ -26,14 +26,20 @@ export function serializeBoardSession(s: BoardSessionRow) {
   };
 }
 
+export function serializeModels(s: Pick<SessionRow, "models" | "model_efforts">) {
+  return {
+    models: JSON.parse(s.models) as string[],
+    model_efforts: s.model_efforts === null ? [] : JSON.parse(s.model_efforts) as ModelEffort[],
+  };
+}
+
 export function serializeSession(s: SessionRow) {
   return {
     ...serializeBoardSession(s),
     manual_title: s.manual_title,
     project: s.project,
     git_branch: s.git_branch,
-    models: JSON.parse(s.models) as string[],
-    model_efforts: s.model_efforts === null ? [] : JSON.parse(s.model_efforts) as ModelEffort[],
+    ...serializeModels(s),
     invoked_by: s.invoked_by,
     machine_name: s.machine_name,
     active_minutes: s.active_minutes,

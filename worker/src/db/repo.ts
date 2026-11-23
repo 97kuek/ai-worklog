@@ -227,6 +227,23 @@ export async function listVisibleBoardSessions(db: D1Database, user: string, cut
   return results;
 }
 
+/** One default per project and engine, plus historical model choices for overrides. */
+export async function readComposerHistory(db: D1Database, user: string) {
+  type Settings = Pick<SessionRow, "tool" | "models" | "model_efforts">;
+  const [recent, available] = await db.batch([
+    db.prepare(`SELECT project, tool, models, model_efforts FROM (
+      SELECT project, tool, models, model_efforts, ended_at, id,
+        ROW_NUMBER() OVER (PARTITION BY project, tool ORDER BY ended_at DESC, id) AS position
+      FROM sessions WHERE user_id = ? AND project IS NOT NULL
+    ) WHERE position = 1 ORDER BY ended_at DESC, id`).bind(user),
+    db.prepare("SELECT DISTINCT tool, models, model_efforts FROM sessions WHERE user_id = ?").bind(user),
+  ]);
+  return {
+    recent: recent.results as (Settings & { project: string })[],
+    available: available.results as Settings[],
+  };
+}
+
 export async function findSession(db: D1Database, userId: string, id: string) {
   const [session, blocks] = await db.batch([
     sessionById(db, userId, id),
