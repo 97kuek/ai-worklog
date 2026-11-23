@@ -1,6 +1,6 @@
 import { failureMessage, queueWaitLabels } from "./launch.js";
-import { requestComposer, type RequestFields, type RequestState, type BoardRequest, type Stage } from "./request-composer.js";
-import { countLabel, el, engineName, type Session } from "./shared.js";
+import { requestComposer, type RequestFields, type RequestOptions, type RequestState, type BoardRequest, type Stage } from "./request-composer.js";
+import { countLabel, el, engineName } from "./shared.js";
 
 export type { BoardRequest } from "./request-composer.js";
 export type SaveRequest = (id: string, change: RequestFields | { stage: Stage } | (RequestState & { expected: RequestState })) => Promise<unknown>;
@@ -19,8 +19,8 @@ function laneOf(item: BoardRequest) {
   return state === "running" || state === "completed" ? state : item.stage;
 }
 
-export function planningLanes(requests: BoardRequest[], save: SaveRequest, sessions: Session[],
-  activity: { running: RequestLane; completed: RequestLane }, runnerProjects: string[]) {
+export function planningLanes(requests: BoardRequest[], save: SaveRequest, readOptions: () => Promise<RequestOptions>,
+  activity: { running: RequestLane; completed: RequestLane }) {
   let items = new Map(requests.map(item => [item.id, item]));
   const busy = new Set<string>();
   const errors = new Map<string, string>();
@@ -61,7 +61,7 @@ export function planningLanes(requests: BoardRequest[], save: SaveRequest, sessi
       }
     }
   }
-  const composer = requestComposer(sessions, () => items.values(), async (id, fields, stage, original) => {
+  const composer = requestComposer(readOptions, () => items.values(), async (id, fields, stage, original) => {
     busy.add(id);
     revision++;
     try {
@@ -78,7 +78,7 @@ export function planningLanes(requests: BoardRequest[], save: SaveRequest, sessi
       revision++;
       draw();
     }
-  }, focusCard, runnerProjects);
+  }, focusCard);
   lanes.backlog.list.before(composer.root);
   function endDrag() {
     dragged = undefined;

@@ -1,4 +1,5 @@
 import { completedBoardWindow } from "./board-retention.js";
+import type { RequestOptions } from "./request-composer.js";
 import { planningLanes, type BoardRequest, type SaveRequest } from "./planning.js";
 import { countLabel, el, engineName, stateOf, statusLabel, titleOf, type Session } from "./shared.js";
 
@@ -37,8 +38,8 @@ function sessionLane(state: Lane) {
 }
 
 export function renderBoard(
-  root: HTMLElement, sessions: Session[], open: (id: string) => void, complete: (id: string) => Promise<void>,
-  plans: BoardRequest[], save: SaveRequest, runnerProjects: string[],
+  root: HTMLElement, sessions: BoardSession[], open: (id: string) => void, complete: (id: string) => Promise<void>,
+  plans: BoardRequest[], save: SaveRequest, readOptions: () => Promise<RequestOptions>,
 ) {
   const requests = pending.get(root) ?? new Map<string, Promise<void>>();
   pending.set(root, requests);
@@ -168,7 +169,7 @@ export function renderBoard(
       focused.focus({ preventScroll: true });
   }
   drawSessions(sessions);
-  const planning = planningLanes(plans, save, sessions, { running: lanes.running, completed: lanes.completed }, runnerProjects);
+  const planning = planningLanes(plans, save, readOptions, { running: lanes.running, completed: lanes.completed });
   columns.append(...planning.sections, ...states.map(state => lanes[state].section));
   board.append(columns);
   root.replaceChildren(board);
