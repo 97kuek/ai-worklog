@@ -2,7 +2,7 @@ import { completedBoardWindow } from "../../ui/board-retention";
 import type { Hono } from "hono";
 import type { AppEnv } from "../app";
 import { listRequests, listRunnerProjects } from "../db/launches";
-import { completeSession, detailETag, readDetailETag, findSession, listBoardSessions, listVisibleBoardSessions, readComposerHistory, saveSessions, setManualTitle } from "../db/repo";
+import { completeSession, detailETag, readDetailETag, findSession, listBoardSessions, listVisibleBoardSessions, readComposerHistory, searchSessions, saveSessions, setManualTitle } from "../db/repo";
 import { LIMITS, parseIngestPayload } from "../domain/ingest";
 import { serializeBlock, serializeBoardSession, serializeModels, serializeSession } from "./serialize";
 
@@ -88,6 +88,18 @@ export function registerSessionRoutes(app: Hono<AppEnv>, now: () => number): voi
       listRequests(c.env.DB, principal.userId, time),
     ]);
     return c.json({ sessions: sessions.map(serializeBoardSession), requests }, 200, { "Cache-Control": "private, no-store" });
+  });
+
+  app.get("/api/sessions/search", async c => {
+    const principal = c.get("principal");
+    if (principal.kind !== "user") return c.json({ error: "forbidden" }, 403);
+    const { q, before, id } = c.req.query();
+    const term = q?.trim();
+    if (!term || term.length > 200 || (before === undefined) !== (id === undefined)
+      || (before !== undefined && (!/^-?\d+$/.test(before) || !Number.isSafeInteger(Number(before)) || !id || id.length > 128)))
+      return c.json({ error: "invalid_search" }, 400);
+    const result = await searchSessions(c.env.DB, principal.userId, term, id ? { start: Number(before), id } : undefined);
+    return c.json(result, 200, { "Cache-Control": "private, no-store" });
   });
 
   app.get("/api/sessions/:id", async (c) => {

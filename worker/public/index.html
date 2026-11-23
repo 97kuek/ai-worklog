@@ -35,7 +35,6 @@
         <div id="mast-menu">
           <nav id="main-nav" aria-label="Navigation">
             <a href="#log">Work log</a>
-            <a href="#calendar">Calendar</a>
             <a href="#board">Board</a>
             <a href="#stats">Activity</a>
             <a href="#usage">Usage</a>
@@ -57,7 +56,10 @@
       <div class="page-head">
         <div class="view-heading">
           <h1 id="title">Work log</h1>
-          <div id="stats-period" role="group" aria-label="Activity period" hidden>
+          <div id="history-view" class="view-switch" role="group" aria-label="Work log view" hidden>
+            <button id="history-list" type="button">List</button><button id="history-calendar" type="button">Calendar</button>
+          </div>
+          <div class="view-switch" id="stats-period" role="group" aria-label="Activity period" hidden>
             <button id="daily" type="button">Daily</button><button id="weekly" type="button">Weekly</button>
           </div>
         </div>
@@ -74,6 +76,11 @@
           <button id="today" class="this-week">This week</button>
         </div>
       </div>
+      <form id="history-search" role="search" hidden>
+        <input type="search" id="history-query" aria-label="Search all weeks by task or project" placeholder="Search all weeks by task or project" maxlength="200" />
+        <button class="small-button" type="submit">Search</button>
+        <button class="small-button" id="clear-search" type="button" hidden>Clear</button>
+      </form>
       <div id="notice" role="status" aria-live="polite"></div>
       <section id="view" aria-labelledby="title"></section>
       <noscript>Enable JavaScript to open Taskfolio.</noscript>

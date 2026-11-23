@@ -2,7 +2,7 @@
 
 English · [日本語](DESIGN.ja.md) · [README](README.md)
 
-Taskfolio puts the work record first. The same header links the weekly log, calendar, board, activity reports, skills and office. The gear opens Settings, and the refresh button updates the current view. [Page structure](worker/public/index.html)
+Taskfolio puts the work record first. The same header links Work log, Board, Activity, Usage, Skills and Office. The gear opens Settings, and the refresh button updates the current view. [Page structure](worker/public/index.html)
 
 ## Color and type
 
@@ -17,7 +17,7 @@ The shared stylesheet defines these tokens and the maximum content width of 1280
 
 ## Interaction
 
-- **Log and calendar.** Tasks retain readable names and open a shared detail dialog. Calendar blocks split at local midnight, and overlapping work sits side by side. Text identifies the status as well as color. [Calendar](worker/ui/calendar.ts) · [Task details](worker/ui/detail.ts)
+- **Log and calendar.** Work log switches between List and Calendar for the same week. List can search task titles and projects across all weeks. Both views open a shared task detail dialog. Calendar blocks split at local midnight, and overlapping work sits side by side. Text identifies the status as well as color. [Calendar](worker/ui/calendar.ts) · [Task details](worker/ui/detail.ts)
 - **Board.** Group cards by their stage. Provide a move button alongside drag-and-drop so keyboard and touch users can queue a request. Completed sessions remain in the underlying history when they age out of the board. [Planning lanes](worker/ui/planning.ts) · [Session lanes](worker/ui/board.ts)
 - **Activity and Office.** Activity supports moving from a week to a day and then to an hour. Office pairs the 3D scene with a selectable task list. [Activity](worker/ui/stats.ts) · [Office](worker/ui/office.ts)
 - **Settings.** Group folders, engines, last check-in and connection testing by Mac. A folder switch controls permission for future launches. Distinguish the Mac's check-in from successful execution of a request. [Settings](worker/ui/settings.ts)

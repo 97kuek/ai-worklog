@@ -219,6 +219,24 @@ function sessionById(db: D1Database, userId: string, id: string) {
   return db.prepare(`${SELECT_SESSION} WHERE s.user_id = ? AND s.id = ?`).bind(userId, id);
 }
 
+const searchPageSize = 30;
+
+export async function searchSessions(db: D1Database, user: string, term: string, cursor?: { start: number; id: string }) {
+  const statement = db.prepare(`SELECT id, COALESCE(manual_title, title) AS title, project, tool, started_at
+    FROM sessions WHERE user_id = ?
+    AND (instr(lower(COALESCE(manual_title, title, '')), lower(?)) > 0 OR instr(lower(project), lower(?)) > 0)
+    ${cursor ? "AND (started_at, id) < (?, ?)" : ""}
+    ORDER BY started_at DESC, id DESC LIMIT ?`);
+  const { results } = await statement.bind(user, term, term, ...(cursor ? [cursor.start, cursor.id] : []), searchPageSize + 1)
+    .all<Pick<SessionRow, "id" | "title" | "project" | "tool" | "started_at">>();
+  const rows = results.slice(0, searchPageSize);
+  const last = rows.at(-1);
+  return {
+    sessions: rows.map(r => ({ ...r, started_at: new Date(r.started_at).toISOString() })),
+    next: results.length > searchPageSize && last ? { start: last.started_at, id: last.id } : null,
+  };
+}
+
 export async function listBoardSessions(db: D1Database, userId: string, status?: "running"): Promise<SessionRow[]> {
   const filter = status === "running" ? `AND s.observed_state = 'running' AND (${currentCompletion}) IS NULL` : "";
   const sessions = await db.prepare(`${SELECT_SESSION} WHERE s.user_id = ? ${filter} ORDER BY s.ended_at DESC, s.id`)
