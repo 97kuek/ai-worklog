@@ -82,7 +82,7 @@ const SESSION_ID = "(SELECT id FROM sessions WHERE user_id = ? AND tool = ? AND 
 
 /**
  * Upserts the machine's name, every session and its blocks in one batch (one transaction).
- * Unchanged rows are not written. `rowsChanged` sums `meta.changes` over the batch.
+ * The ingestion change count excludes receipt bookkeeping.
  */
 export async function saveSessions(
   db: D1Database,
@@ -158,8 +158,13 @@ export async function saveSessions(
         .bind(p.userId, s.tool, s.native_session_id, s.blocks.length),
     );
   }
-  const results = await db.batch(stmts);
-  return { rowsChanged: results.reduce((n, r) => n + (r.meta.changes ?? 0), 0) };
+  const receipts = [...new Set(payload.sessions.map(s => s.tool))].map(tool =>
+    db.prepare(`INSERT INTO machine_log_receipts (machine_id, tool, received_at) VALUES (?, ?, ?)
+      ON CONFLICT (machine_id, tool) DO UPDATE SET received_at = excluded.received_at
+      WHERE excluded.received_at > machine_log_receipts.received_at`).bind(p.machineId, tool, now)
+  );
+  const results = await db.batch([...stmts, ...receipts]);
+  return { rowsChanged: results.slice(0, stmts.length).reduce((n, r) => n + (r.meta.changes ?? 0), 0) };
 }
 
 export type SessionRow = {

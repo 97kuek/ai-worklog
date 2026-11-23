@@ -3,18 +3,20 @@ import { ONLINE_FOR } from "./launches";
 export async function listMachines(db: D1Database, user: string, now: number) {
   const { results } = await db.prepare(`SELECT m.id, m.name, b.seen_at, b.engines,
       m.test_requested_at, m.test_acknowledged_at,
+      (SELECT json_group_object(tool, received_at) FROM machine_log_receipts WHERE machine_id=m.id) AS log_received_at,
       (SELECT json_group_array(json_object('key',project,'enabled',enabled)) FROM (
         SELECT DISTINCT project,enabled FROM runner_projects WHERE machine_id=m.id ORDER BY project
       )) AS projects
     FROM machines m LEFT JOIN board_runners b ON b.machine_id=m.id
     WHERE m.user_id=? ORDER BY m.created_at,m.id`).bind(user).all<{
     id: string; name: string | null; seen_at: number | null; engines: string | null;
-    projects: string; test_requested_at: number | null; test_acknowledged_at: number | null;
+    projects: string; log_received_at: string; test_requested_at: number | null; test_acknowledged_at: number | null;
   }>();
   return results.map(m => ({
     id: m.id,
     name: m.name?.trim() || "Mac " + m.id.slice(0, 8),
     seen_at: m.seen_at,
+    log_received_at: JSON.parse(m.log_received_at) as Record<string, number>,
     online: m.seen_at !== null && m.seen_at > now - ONLINE_FOR,
     projects: (JSON.parse(m.projects) as { key: string; enabled: number }[]).map(p => ({ key: p.key, enabled: !!p.enabled })),
     engines: [...new Set<string>(JSON.parse(m.engines ?? "[]"))].sort(),

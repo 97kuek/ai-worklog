@@ -1,4 +1,5 @@
 import { env } from "cloudflare:test";
+import example from "../../contract/ingest.example.json";
 import { testApp } from "./helpers";
 
 const ORIGIN = "https://worklog.example";
@@ -35,6 +36,37 @@ async function setup() {
 
 beforeEach(async () => {
   await env.DB.batch(["board_requests", "sessions", "machines", "users"].map(t => env.DB.prepare("DELETE FROM " + t)));
+});
+
+it("tracks accepted log uploads independently of runner check-ins, by machine and engine", async () => {
+  const s = await setup();
+  const upload = (machine: string, sessions: unknown[]) =>
+    s.call("/api/sessions", machine, "PUT", { machine_name: "Test Mac", sessions });
+  const machineId = async (token: string) => (await (await s.call("/api/me", token, "GET")).json<{machine_id: string}>()).machine_id;
+  const first = await machineId(s.mac);
+  const second = await machineId(s.otherMac);
+  async function receipts() {
+    const { machines } = await (await s.call("/api/settings", s.user, "GET"))
+      .json<{ machines: { id: string; log_received_at: Record<string, number> }[] }>();
+    return Object.fromEntries(machines.map(m => [m.id, m.log_received_at]));
+  }
+  const now = 1_800_000_000_000;
+  const [claude, codex] = example.sessions;
+  expect(await receipts()).toEqual({ [first]: {}, [second]: {} });
+  expect((await upload(s.mac, [claude, codex])).status).toBe(200);
+  s.tick(10);
+  expect((await upload(s.mac, [codex])).status).toBe(200);
+  s.tick(5);
+  expect((await upload(s.otherMac, [claude])).status).toBe(200);
+  s.tick(5);
+  expect((await s.claim()).status).toBe(200);
+  expect((await upload(s.mac, [claude, {}])).status).toBe(400);
+  s.tick(-20);
+  expect((await upload(s.mac, [codex])).status).toBe(200);
+  expect(await receipts()).toEqual({
+    [first]: { claude_code: now, codex: now + 10 },
+    [second]: { claude_code: now + 15 },
+  });
 });
 
 it("selects the newest eligible Mac, snapshots the card, and claims and completes it only once", async () => {
@@ -332,7 +364,7 @@ it("lists collectors and legacy runners, and waits for the target Mac's next aut
   const list = async () => (await s.call("/api/settings", s.user, "GET")).json<{ machines: {id: string; online: boolean}[] }>();
   expect(await list()).toEqual({ machines: [] });
   const { machine_id: id } = await (await s.call("/api/me", s.mac, "GET")).json<{machine_id: string}>();
-  const machine = { id, name: "Mac " + id.slice(0, 8), seen_at: null, online: false, projects: [], engines: [], connection_test: null };
+  const machine = { id, name: "Mac " + id.slice(0, 8), seen_at: null, online: false, projects: [], engines: [], log_received_at: {}, connection_test: null };
   expect(await list()).toEqual({ machines: [machine] });
   const path = "/api/settings/machines/" + id + "/test";
   const requested_at = 1_800_000_000_000;
