@@ -140,10 +140,6 @@ export function renderSettings(root: HTMLElement, settings: RunnerSettings, acti
   guide.append(el("p", "", "On your Mac, run this command in Terminal and choose the folder to use."));
   guide.append(el("code", "", "~/.cargo/bin/taskfolio folder add"));
   guide.append(el("p", "", "After the next check-in, refresh Settings to see the folder. Its switch pauses or resumes queued work."));
-  const docs = el("a", "", "Mac のセットアップ手順");
-  docs.lang = "ja";
-  docs.href = "#help/mac";
-  guide.append(docs);
   layout.append(guide);
   root.replaceChildren(layout);
 }
