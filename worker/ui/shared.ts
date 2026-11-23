@@ -72,7 +72,7 @@ export function engineName(tool: string) {
   return ({ claude_code: "Claude Code", codex: "Codex" } as Record<string, string>)[tool] ?? tool;
 }
 // Older collectors only sent model names. Keep those rows visible with an unknown effort.
-export function modelSettings(session: Session): ModelEffort[] {
+export function modelSettings(session: Pick<Session, "models" | "model_efforts">): ModelEffort[] {
   const pairs = new Map<string, ModelEffort>();
   const recorded = new Set<string>();
   for (const entry of session.model_efforts ?? []) {

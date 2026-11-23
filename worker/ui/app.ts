@@ -1,5 +1,5 @@
 import { requestErrorMessages } from "./launch.js";
-import type { BoardRequest } from "./planning.js";
+import type { RequestOptions } from "./request-composer.js";
 import {
   addDays,
   el,
@@ -53,6 +53,7 @@ function scheduleLiveRefresh() {
   if (liveView() && !document.hidden) liveTimer = window.setTimeout(() => void load(), LIVE_REFRESH_MS);
 }
 let refreshBoard: ReturnType<typeof renderBoard> | undefined;
+let refreshDetail: (() => Promise<void>) | undefined;
 let pollingBoard: typeof refreshBoard;
 let boardTimer: number | undefined;
 function scheduleBoardRefresh() {
@@ -66,6 +67,7 @@ async function pollBoard() {
   if (!refresh || pollingBoard === refresh || document.hidden) return;
   pollingBoard = refresh;
   try {
+    void refreshDetail?.();
     await refresh(async () => {
       const data = await api<BoardUpdates>("/api/board/updates", { signal });
       if (refreshBoard === refresh && notice.dataset.boardOffline) {
@@ -135,49 +137,91 @@ async function showDetail(id: string, block?: Block) {
     opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     dialog.showModal();
   }
-  try {
-    const data = await api<{ session: Session; blocks: Block[] }>("/api/sessions/" + encodeURIComponent(id), {
-      signal: controller.signal,
-    });
-    if (!controller.signal.aborted) {
-      editTaskTitle(heading, data.session, async (value, expected) => {
-        const result = await api<{ session: Session }>("/api/sessions/" + encodeURIComponent(id) + "/title", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ title: value, expected }),
-        });
-        void load();
-        return result.session;
-      });
-      renderDetail(body, data.session, data.blocks, block);
-      if (view === "board" && data.session.observed_status?.state === "waiting" && !data.session.completed_at) {
-        const move = el("button", "small-button", "Move to Completed");
-        const error = el("p", "board-error");
-        error.setAttribute("role", "alert");
-        move.onclick = async () => {
-          move.disabled = true;
-          try {
-            await complete(id);
-            if (!controller.signal.aborted) dialog.close();
-          } catch (e) {
-            error.textContent = message(e);
-          } finally {
-            move.disabled = false;
-          }
-        };
-        body.append(move, error);
-      }
+  const content = el("div", "detail-content");
+  const problem = el("p", "board-error");
+  problem.setAttribute("role", "alert");
+  const move = el("button", "small-button", "Move to Completed");
+  move.hidden = true;
+  body.append(content, move, problem);
+  let completing = false;
+  move.onclick = async () => {
+    completing = true;
+    move.disabled = true;
+    try {
+      await complete(id);
+      if (!controller.signal.aborted) dialog.close();
+    } catch (e) {
+      problem.textContent = message(e);
+    } finally {
+      completing = false;
+      move.disabled = false;
     }
-  } catch (e) {
-    if (!controller.signal.aborted) {
-      showTitle(heading, "Task details");
-      body.replaceChildren(errorBox(e, () => void showDetail(id, block)));
+  };
+  const path = "/api/sessions/" + encodeURIComponent(id);
+  let savedRevision = 0;
+  async function saveTitle(value: string | null, expected: string | null) {
+    const result = await api<{ session: Session }>(path + "/title", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: value, expected }),
+    });
+    savedRevision++;
+    if (view === "board") void pollBoard();
+    else void load();
+    return result.session;
+  }
+  let busy = false;
+  let previous = "";
+  let titleVersion = "";
+  async function update() {
+    if (busy || controller.signal.aborted || !dialog.open) return;
+    busy = true;
+    const revision = savedRevision;
+    try {
+      const data = await api<{ session: Session; blocks: Block[] }>(path, { signal: controller.signal });
+      if (controller.signal.aborted || !dialog.open) return;
+      const { session, blocks } = data;
+      const title = JSON.stringify([session.title, session.manual_title]);
+      if (titleVersion !== title && savedRevision === revision && !heading.querySelector("form")) {
+        editTaskTitle(heading, session, saveTitle);
+        titleVersion = title;
+      }
+      const snapshot = JSON.stringify(data);
+      if (snapshot !== previous) {
+        const expanded = content.querySelector("details")?.open;
+        const focused = document.activeElement?.matches("summary") && content.contains(document.activeElement);
+        renderDetail(content, session, blocks, block, view === "board");
+        const details = content.querySelector("details");
+        if (expanded && details) details.open = true;
+        if (focused) details?.querySelector("summary")?.focus({ preventScroll: true });
+        previous = snapshot;
+      }
+      move.hidden = view !== "board" || session.observed_status?.state !== "waiting" || Boolean(session.completed_at);
+      if (!completing) move.disabled = false;
+      if (problem.dataset.refreshError) {
+        problem.textContent = "";
+        delete problem.dataset.refreshError;
+      }
+    } catch (e) {
+      if (controller.signal.aborted || !dialog.open) return;
+      if (!previous) {
+        showTitle(heading, "Task details");
+        content.replaceChildren(errorBox(e, () => void update()));
+      } else {
+        problem.dataset.refreshError = "true";
+        problem.textContent = "Task updates paused. " + message(e);
+        move.disabled = true;
+      }
+    } finally {
+      busy = false;
     }
   }
+  refreshDetail = view === "board" ? update : undefined;
+  await update();
 }
 node("close").onclick = () => dialog.close();
 dialog.addEventListener("close", () => {
   if (dialog.open) return;
+  refreshDetail = undefined;
   detailRequest?.abort();
   if (opener?.isConnected) opener.focus({ preventScroll: true });
   else focusMain();
@@ -283,12 +327,12 @@ async function load(done = "") {
       if (controller.signal.aborted) return;
       renderSkills(root, data.skills);
     } else if (view === "board") {
-      const data = await api<{ sessions: Session[]; requests: BoardRequest[]; runnerProjects?: string[] }>("/api/board", { signal: controller.signal });
+      const data = await api<BoardUpdates>("/api/board/updates", { signal: controller.signal });
       if (controller.signal.aborted) return;
       refreshBoard = renderBoard(root, data.sessions, showDetail, complete, data.requests ?? [], (id, change) =>
         api("/api/board/requests/" + encodeURIComponent(id), {
           method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(change),
-        }), data.runnerProjects ?? []);
+        }), () => api<RequestOptions>("/api/board/request-options", { signal: controller.signal }));
     } else {
       const q = new URLSearchParams({ from: start.toISOString(), to: end.toISOString() });
       const data = await api<WeekData>("/api/blocks?" + q, { signal: controller.signal });

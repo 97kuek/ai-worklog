@@ -1,5 +1,5 @@
 import { duration } from "./activity.js";
-import { blockTimeRange, countLabel, dataTable, el, engineName, fullDate, modelSettings, type Block, type Session } from "./shared.js";
+import { blockTimeRange, countLabel, dataTable, el, engineName, fullDate, stateOf, statusLabel, modelSettings, type Block, type Session } from "./shared.js";
 
 const tokenFields = [
   ["input", "Input"], ["output", "Output"], ["cache_read", "Cache read"], ["cache_write", "Cache write"],
@@ -69,12 +69,13 @@ function fact(list: HTMLElement, label: string, value: string) {
   list.append(item);
 }
 
-export function renderDetail(root: HTMLElement, session: Session, blocks: Block[], selected?: Block) {
+export function renderDetail(root: HTMLElement, session: Session, blocks: Block[], selected?: Block, showStatus = false) {
   const facts = el("dl", "facts detail-facts");
   const { project, git_branch } = session;
   if (project || git_branch) {
     fact(facts, project ? "Project" : "Branch", [project, git_branch].filter(Boolean).join(" / "));
   }
+  if (showStatus) fact(facts, "Status", statusLabel(stateOf(session)));
   const settings = dataTable("detail-settings", "Execution settings", ["Engine", "Model", "Effort"]);
   const pairs = modelSettings(session);
   const rows = settings.createTBody();
