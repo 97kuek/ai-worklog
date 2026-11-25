@@ -9,11 +9,14 @@ use crate::domain::{fnv1a64, ModelEffort, Session, TokenUsage, Tool};
 pub struct Outgoing<'a> {
     pub session: &'a Session,
     pub title: Option<&'a str>,
+    pub import_corrected: bool,
 }
 
 #[derive(Serialize)]
 struct SessionOut<'a> {
     tool: Tool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    import_corrected: bool,
     native_session_id: &'a str,
     title: Option<&'a str>,
     project: Option<&'a str>,
@@ -51,6 +54,7 @@ fn session_out<'a>(item: &Outgoing<'a>) -> SessionOut<'a> {
     let s = item.session;
     SessionOut {
         tool: s.tool,
+        import_corrected: item.import_corrected,
         native_session_id: &s.native_session_id,
         title: item.title,
         project: s.project.as_deref(),
@@ -193,8 +197,8 @@ mod tests {
     fn matches_the_contract_example() {
         let (a, b) = (claude(), codex());
         let items = [
-            Outgoing { session: &a, title: Some("見本の作業") },
-            Outgoing { session: &b, title: None },
+            Outgoing { import_corrected: false, session: &a, title: Some("見本の作業") },
+            Outgoing { import_corrected: false, session: &b, title: None },
         ];
         let got: serde_json::Value = serde_json::from_str(&to_ingest_json("example-mac", &items)).unwrap();
         let want: serde_json::Value =
@@ -206,7 +210,7 @@ mod tests {
     fn never_emits_source_title() {
         let mut s = claude();
         s.source_title = Some("スレッド名".into());
-        let json = to_ingest_json("m", &[Outgoing { session: &s, title: None }]);
+        let json = to_ingest_json("m", &[Outgoing { import_corrected: false, session: &s, title: None }]);
         assert!(!json.contains("source_title"));
         assert!(!json.contains("スレッド名"));
     }
@@ -214,33 +218,33 @@ mod tests {
     #[test]
     fn fingerprint_changes_with_content_and_title() {
         let s = claude();
-        let base = session_fingerprint(&Outgoing { session: &s, title: Some("a") });
-        assert_eq!(base, session_fingerprint(&Outgoing { session: &claude(), title: Some("a") }));
+        let base = session_fingerprint(&Outgoing { import_corrected: false, session: &s, title: Some("a") });
+        assert_eq!(base, session_fingerprint(&Outgoing { import_corrected: false, session: &claude(), title: Some("a") }));
 
         let mut status = claude();
         status.observed_status.as_mut().unwrap().state = ObservedState::Running;
-        assert_ne!(base, session_fingerprint(&Outgoing { session: &status, title: Some("a") }));
+        assert_ne!(base, session_fingerprint(&Outgoing { import_corrected: false, session: &status, title: Some("a") }));
         status.observed_status = s.observed_status;
         status.observed_status.as_mut().unwrap().at += 1;
-        assert_ne!(base, session_fingerprint(&Outgoing { session: &status, title: Some("a") }));
+        assert_ne!(base, session_fingerprint(&Outgoing { import_corrected: false, session: &status, title: Some("a") }));
 
         let mut ended = claude();
         ended.blocks[1].ended_at += 1000;
-        assert_ne!(base, session_fingerprint(&Outgoing { session: &ended, title: Some("a") }));
+        assert_ne!(base, session_fingerprint(&Outgoing { import_corrected: false, session: &ended, title: Some("a") }));
 
         let mut tokens = claude();
         tokens.blocks[0].tokens.output += 1;
-        assert_ne!(base, session_fingerprint(&Outgoing { session: &tokens, title: Some("a") }));
+        assert_ne!(base, session_fingerprint(&Outgoing { import_corrected: false, session: &tokens, title: Some("a") }));
 
-        assert_ne!(base, session_fingerprint(&Outgoing { session: &s, title: Some("b") }));
-        assert_ne!(base, session_fingerprint(&Outgoing { session: &s, title: None }));
+        assert_ne!(base, session_fingerprint(&Outgoing { import_corrected: false, session: &s, title: Some("b") }));
+        assert_ne!(base, session_fingerprint(&Outgoing { import_corrected: false, session: &s, title: None }));
     }
 
     #[test]
     fn fingerprint_is_fnv1a_of_the_session_json() {
         // 保存する値なので、Rust の版で変わらないハッシュを使う
         let s = claude();
-        let item = Outgoing { session: &s, title: Some("a") };
+        let item = Outgoing { import_corrected: false, session: &s, title: Some("a") };
         let json = serde_json::to_string(&session_out(&item)).unwrap();
         assert_eq!(session_fingerprint(&item), crate::domain::fnv1a64(json.as_bytes()));
     }

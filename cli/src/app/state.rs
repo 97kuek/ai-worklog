@@ -37,6 +37,7 @@ pub struct FileEntry {
     pub status_scanned: bool,
     /// Available main and child logs are reread once to recover per-model efforts.
     pub efforts_scanned: bool,
+    pub import_scanned: bool,
     pub claude: Option<(String /*session_id*/, bool /*is_main*/, ClaudeFileState)>,
     pub codex: Option<CodexFileState>,
 }
@@ -126,7 +127,7 @@ mod tests {
         let mut s = State::default();
         s.files.insert(
             "1:2".into(),
-            FileEntry { path: "/x/a.jsonl".into(), offset: 42, status_scanned: true, efforts_scanned: true, claude: Some(("a".into(), true, Default::default())), codex: None },
+            FileEntry { path: "/x/a.jsonl".into(), offset: 42, status_scanned: true, efforts_scanned: true, import_scanned: false, claude: Some(("a".into(), true, Default::default())), codex: None },
         );
         save(&path, &s).unwrap();
         let back = load(&path);

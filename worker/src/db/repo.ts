@@ -78,7 +78,7 @@ function blockValues(b: IngestPayload["sessions"][number]["blocks"][number]) {
   return [b.started_at, b.ended_at, b.message_count, b.tokens.input, b.tokens.output, b.tokens.cache_read, b.tokens.cache_write];
 }
 
-const SESSION_ID = "(SELECT id FROM sessions WHERE user_id = ? AND tool = ? AND native_session_id = ?)";
+const INGEST_SESSION = "FROM sessions WHERE user_id = ? AND tool = ? AND native_session_id = ? AND import_corrected = ?";
 
 /**
  * Upserts the machine's name, every session and its blocks in one batch (one transaction).
@@ -98,13 +98,15 @@ export async function saveSessions(
     stmts.push(
       db
         .prepare(
-          `INSERT INTO sessions (id, user_id, tool, native_session_id, ${SESSION_COLUMNS.join(", ")}, observed_state, observed_at, updated_at)
-           VALUES (?, ?, ?, ?, ${SESSION_COLUMNS.map(() => "?").join(", ")}, ?, ?, ?)
+          `INSERT INTO sessions (id, user_id, tool, native_session_id, ${SESSION_COLUMNS.join(", ")}, observed_state, observed_at, updated_at, import_corrected)
+           VALUES (?, ?, ?, ?, ${SESSION_COLUMNS.map(() => "?").join(", ")}, ?, ?, ?, ?)
            ON CONFLICT (user_id, tool, native_session_id) DO UPDATE SET ${sessionAssignments},
-             observed_state = CASE WHEN ${newerObservation} THEN excluded.observed_state ELSE sessions.observed_state END,
-             observed_at = CASE WHEN ${newerObservation} THEN excluded.observed_at ELSE sessions.observed_at END,
-             updated_at = MAX(sessions.updated_at + 1, excluded.updated_at)
-           WHERE ${sessionDiffers} OR (${newerObservation}) OR ${storedBlockValues} <> ?`,
+             observed_state = CASE WHEN excluded.import_corrected > sessions.import_corrected OR (${newerObservation}) THEN excluded.observed_state ELSE sessions.observed_state END,
+             observed_at = CASE WHEN excluded.import_corrected > sessions.import_corrected OR (${newerObservation}) THEN excluded.observed_at ELSE sessions.observed_at END,
+             updated_at = MAX(sessions.updated_at + 1, excluded.updated_at),
+             import_corrected = excluded.import_corrected
+           WHERE excluded.import_corrected >= sessions.import_corrected
+             AND (${sessionDiffers} OR (${newerObservation}) OR excluded.import_corrected > sessions.import_corrected OR ${storedBlockValues} <> ?)`,
         )
         .bind(
           crypto.randomUUID(),
@@ -127,6 +129,7 @@ export async function saveSessions(
           s.observed_status?.state ?? null,
           s.observed_status?.at ?? null,
           now,
+          s.import_corrected ? 1 : 0,
           JSON.stringify(s.blocks.map(blockValues)),
         ),
     );
@@ -138,15 +141,16 @@ export async function saveSessions(
         db
           .prepare(
             `INSERT INTO blocks (session_id, seq, ${BLOCK_COLUMNS.join(", ")})
-             VALUES (${SESSION_ID}, ?, ${BLOCK_COLUMNS.map(() => "?").join(", ")})
+             SELECT id, ?, ${BLOCK_COLUMNS.map(() => "?").join(", ")} ${INGEST_SESSION}
              ON CONFLICT (session_id, seq) DO UPDATE SET ${blockAssignments}
              WHERE ${blockDiffers}`,
           )
           .bind(
-            ...key,
             b.seq,
             p.userId,
             ...blockValues(b),
+            ...key,
+            s.import_corrected ? 1 : 0,
           ),
       );
     }
@@ -154,8 +158,8 @@ export async function saveSessions(
   for (const s of payload.sessions) {
     stmts.push(
       db
-        .prepare(`DELETE FROM blocks WHERE session_id = ${SESSION_ID} AND seq >= ?`)
-        .bind(p.userId, s.tool, s.native_session_id, s.blocks.length),
+        .prepare(`DELETE FROM blocks WHERE session_id = (SELECT id ${INGEST_SESSION}) AND seq >= ?`)
+        .bind(p.userId, s.tool, s.native_session_id, s.import_corrected ? 1 : 0, s.blocks.length),
     );
   }
   const receipts = [...new Set(payload.sessions.map(s => s.tool))].map(tool =>
@@ -237,9 +241,13 @@ export async function searchSessions(db: D1Database, user: string, term: string,
   };
 }
 
+const hasWorkBlocks = "(s.import_corrected = 0 OR EXISTS (SELECT 1 FROM blocks WHERE session_id = s.id))";
+
 export async function listBoardSessions(db: D1Database, userId: string, status?: "running"): Promise<SessionRow[]> {
   const filter = status === "running" ? `AND s.observed_state = 'running' AND (${currentCompletion}) IS NULL` : "";
-  const sessions = await db.prepare(`${SELECT_SESSION} WHERE s.user_id = ? ${filter} ORDER BY s.ended_at DESC, s.id`)
+  const sessions = await db.prepare(`${SELECT_SESSION} WHERE s.user_id = ?
+    AND ${hasWorkBlocks}
+    ${filter} ORDER BY s.ended_at DESC, s.id`)
     .bind(userId).all<SessionRow>();
   return sessions.results;
 }
@@ -250,6 +258,7 @@ export type BoardSessionRow = Pick<SessionRow, "id" | "tool" | "project" | "titl
 export async function listVisibleBoardSessions(db: D1Database, user: string, cutoff: number) {
   const { results } = await db.prepare(`SELECT id, tool, project, title, manual_title, observed_state, observed_at,
     ${currentCompletion} AS completed_at, started_at, ended_at FROM sessions s WHERE user_id = ?
+    AND ${hasWorkBlocks}
     AND ((${currentCompletion}) > ? OR ((${currentCompletion}) IS NULL AND observed_state IN ('running', 'waiting')))`)
     .bind(user, cutoff).all<BoardSessionRow>();
   return results;

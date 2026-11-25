@@ -4,6 +4,7 @@ export type ObservedStatus = { state: "running" | "waiting" | "unknown"; at: num
 export type ModelEffort = { model: string; effort: string | null };
 export type IngestSession = {
   tool: string;
+  import_corrected?: true;
   native_session_id: string;
   title: string | null;
   project: string | null;
@@ -127,6 +128,9 @@ function modelEfforts(v: unknown, path: string): ModelEffort[] {
 function session(v: unknown, path: string): IngestSession {
   if (!isObject(v)) return fail(path, "must be an object");
   const tool = ident(v.tool, `${path}.tool`);
+  if (v.import_corrected !== undefined && (v.import_corrected !== true || tool !== "codex")) {
+    return fail(`${path}.import_corrected`, "must be true and is only supported for Codex sessions");
+  }
   const native_session_id = str(v.native_session_id, `${path}.native_session_id`, 1, 128);
   const title = nullableStr(v.title, `${path}.title`, 200);
   const project = nullableStr(v.project, `${path}.project`, 200);
@@ -147,11 +151,12 @@ function session(v: unknown, path: string): IngestSession {
 
   const sessionTokens = tokens(v.tokens, `${path}.tokens`);
 
-  if (!Array.isArray(v.blocks) || v.blocks.length === 0) return fail(`${path}.blocks`, "must be a non-empty array");
+  if (!Array.isArray(v.blocks) || (v.blocks.length === 0 && v.import_corrected !== true)) return fail(`${path}.blocks`, "must be a non-empty array");
   const blocks = v.blocks.map((b, i) => block(b, `${path}.blocks[${i}]`, i));
 
   return {
     tool,
+    ...(v.import_corrected === true ? { import_corrected: true as const } : {}),
     native_session_id,
     title,
     project,

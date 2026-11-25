@@ -34,6 +34,8 @@ pub struct SessionEntry {
     pub title: Option<String>,
     pub name_attempts: u8,
     pub sent_fingerprint: Option<u64>,
+    pub sent_import_correction: bool,
+    pub upload_failures: u32,
     /// Keep ephemeral hook / live observations through retries and process exits.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_status: Option<StatusObservation>,
@@ -111,7 +113,7 @@ mod tests {
         let mut l = Ledger::default();
         l.sessions.insert(
             "claude_code:a".into(),
-            SessionEntry { title: Some("作業".into()), name_attempts: 1, sent_fingerprint: Some(u64::MAX), external_status: None, permission_wait: None, sent_messages: 9, sent_tokens: 1234 },
+            SessionEntry { title: Some("作業".into()), name_attempts: 1, sent_fingerprint: Some(u64::MAX), sent_import_correction: true, upload_failures: 2, external_status: None, permission_wait: None, sent_messages: 9, sent_tokens: 1234 },
         );
         save(&path, &l).unwrap();
         let back = load(&path);

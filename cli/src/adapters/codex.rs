@@ -128,6 +128,9 @@ pub struct CodexFileState {
     /// Current task_started context, retained across incremental reads.
     pub turn_id: Option<String>,
     pub final_answer_at: Option<Millis>,
+    /// The first synthetic turn provides a timestamp for import-only metadata.
+    pub first_import_at: Option<Millis>,
+    importing_turn: bool,
     review: Option<ReviewContext>,
     pub raw: RawSession,
     /// 累計値の前回の値（差分を出すため）
@@ -175,6 +178,27 @@ pub fn read_codex_file(path: &Path, from: u64, st: &mut CodexFileState) -> std::
 fn apply_line(st: &mut CodexFileState, line: Line) {
     let at = line.timestamp.and_then(parse_ts);
     let payload = line.payload.map(RawValue::get).unwrap_or("null");
+    if line.kind == "event_msg"
+        && (st.importing_turn || payload.contains("external-import-turn-")
+            || (st.first_import_at.is_some() && payload.contains("thread_settings_applied")))
+        && let Ok(event) = serde_json::from_str::<TurnEvent>(payload)
+    {
+        if event.kind == "task_started" {
+            st.importing_turn = event.turn_id.as_deref().is_some_and(|id| id.starts_with("external-import-turn-"));
+            if st.importing_turn {
+                st.first_import_at = st.first_import_at.or(at);
+                return;
+            }
+        } else if event.kind == "task_complete" && st.importing_turn {
+            st.importing_turn = false;
+            return;
+        } else if st.first_import_at.is_some() && event.kind == "thread_settings_applied" {
+            return;
+        }
+    }
+    if st.importing_turn {
+        return;
+    }
     match line.kind {
         // The first session_meta decides the thread; forks replay later ones.
         "session_meta" if st.role.is_none() => {
@@ -622,9 +646,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dst);
         copy_tree(src, &dst);
         let old = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(946_684_800);
-        for f in stale {
-            let p = dst.join("sessions/2026/11/20").join(f);
-            std::fs::File::options().write(true).open(&p).unwrap().set_modified(old).unwrap();
+        let recent = SystemTime::now();
+        for file in std::fs::read_dir(dst.join("sessions/2026/11/20")).unwrap().flatten() {
+            let name = file.file_name();
+            let modified = if stale.iter().any(|&stale_name| name == stale_name) { old } else { recent };
+            std::fs::File::options().write(true).open(file.path()).unwrap().set_modified(modified).unwrap();
         }
         dst
     }

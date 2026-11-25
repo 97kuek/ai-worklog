@@ -16,6 +16,17 @@ cargo run --locked --manifest-path cli/Cargo.toml -- scan --since-days 7 --forma
 
 Each session is one task. A gap of 30 minutes or more starts a new work block by default. Active time is the sum of those recorded intervals. Select a task in the web app to see its branch, models, token counts and work blocks.
 
+Codex Desktop can import external chats. Taskfolio excludes replayed turns from the calendar and activity totals, while keeping work recorded when you resume an imported chat. To correct previously uploaded blocks, apply the Worker migrations and deploy the Worker before upgrading the CLI. The next collection rereads available Codex logs and uploads the corrections.
+
+The collection log records uploads pending retry and sessions recovered by a later upload. It emits a warning when a session first fails two consecutive temporary upload attempts. Skill inventory errors are recorded separately under `skill_errors`.
+
+## Web sign-in
+
+To sign in to the Taskfolio web UI with Google, add Google as an identity provider in Cloudflare Zero Trust and enable it on the Taskfolio Access application. Use the Google account whose email matches the Worker's existing `OWNER_EMAIL` so Access and Taskfolio resolve the same account. Restrict the application's Allow policy to that address and test access in a fresh browser session before changing the existing sign-in methods. See the [Cloudflare Google identity provider guide](https://developers.cloudflare.com/cloudflare-one/integrations/identity-providers/google/).
+
+The collector and runner authenticate separately using Cloudflare Access service credentials configured through `taskfolio login`.
+
+
 ## Set up your work log
 
 1. Deploy the Worker and database to your Cloudflare account and protect the hostname with Access.

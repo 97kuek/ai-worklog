@@ -153,7 +153,7 @@ pub fn sync(home: &Path, cwd: &Path, now: Millis, sender: &HttpSender, report: &
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
         Err(e) if e.kind() == ErrorKind::NotFound => Checkpoints::default(),
         Err(_) => {
-            report.errors.push("cannot read skill sync state".into());
+            report.skill_errors.push("cannot read skill sync state".into());
             return;
         }
     };
@@ -184,7 +184,7 @@ pub fn sync(home: &Path, cwd: &Path, now: Millis, sender: &HttpSender, report: &
         let source = match source {
             Ok(source) => source,
             Err(reason) => {
-                report.errors.push(reason.into());
+                report.skill_errors.push(reason.into());
                 continue;
             }
         };
@@ -200,7 +200,7 @@ pub fn sync(home: &Path, cwd: &Path, now: Millis, sender: &HttpSender, report: &
         cp.checked_at = now;
         cp.retry = true;
         match source.discover(cwd) {
-            Err(reason) => report.errors.push(format!("{label} skills: {reason}")),
+            Err(reason) => report.skill_errors.push(format!("{label} skills: {reason}")),
             Ok(rows) => {
                 match cp.send_changed(
                     source.tool(),
@@ -227,7 +227,7 @@ pub fn sync(home: &Path, cwd: &Path, now: Millis, sender: &HttpSender, report: &
                             SendError::Network(_) => "network error".into(),
                         };
                         report
-                            .errors
+                            .skill_errors
                             .push(format!("{label} skills: upload failed: {reason}"));
                     }
                 }
@@ -235,7 +235,7 @@ pub fn sync(home: &Path, cwd: &Path, now: Millis, sender: &HttpSender, report: &
         }
     }
     if dirty && write_atomically(&path, &serde_json::to_vec(&checkpoints).unwrap()).is_err() {
-        report.errors.push("cannot save skill sync state".into());
+        report.skill_errors.push("cannot save skill sync state".into());
     }
 }
 

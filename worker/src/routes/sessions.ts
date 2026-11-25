@@ -39,8 +39,10 @@ export function registerSessionRoutes(app: Hono<AppEnv>, now: () => number): voi
       parsed.value,
       now(),
     );
+    const corrections = parsed.value.sessions.filter((s) => s.import_corrected).length;
     return c.json({
       sessions: parsed.value.sessions.length,
+      ...(corrections ? { import_corrections: corrections } : {}),
       blocks: parsed.value.sessions.reduce((n, s) => n + s.blocks.length, 0),
       rows_changed: rowsChanged,
     });
