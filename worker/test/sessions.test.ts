@@ -94,6 +94,45 @@ it("deletes_blocks_that_no_longer_exist", async () => {
   expect(row!.n).toBe(1);
 });
 
+it("removes replayed Codex blocks while preserving the session and accepting resumed work", async () => {
+  const original = fresh().sessions[1]!;
+  expect((await put({ machine_name: example.machine_name, sessions: [original] })).status).toBe(200);
+  const { app, userToken } = await testApp();
+  const headers = { [H]: await userToken() };
+  const board = () => app.request("/api/board", { headers }, env);
+  const range = "/api/blocks?from=2026-11-20T00:00:00Z&to=2026-11-21T00:00:00Z";
+  const calendar = () => app.request(range, { headers }, env);
+  const { sessions: [initial] } = (await (await board()).json()) as { sessions: { id: string }[] };
+  expect(((await (await calendar()).json()) as { blocks: unknown[] }).blocks).toHaveLength(1);
+
+  const corrected = {
+    ...original,
+    import_corrected: true,
+    blocks: [],
+    tokens: { input: 0, output: 0, cache_read: 0, cache_write: 0 },
+  };
+  const send = (session: unknown) => put({ machine_name: example.machine_name, sessions: [session] });
+  expect((await send(corrected)).status).toBe(200);
+  expect((await send(original)).status).toBe(200);
+  expect(await (await board()).json()).toMatchObject({ sessions: [] });
+  expect(await (await calendar()).json()).toMatchObject({ sessions: [], blocks: [] });
+  const detail = await app.request(`/api/sessions/${initial!.id}`, { headers }, env);
+  expect(await detail.json()).toMatchObject({ session: { id: initial!.id }, blocks: [] });
+
+  const started_at = "2026-11-20T06:00:00.000Z";
+  const resumed = {
+    ...original,
+    import_corrected: true,
+    started_at,
+    ended_at: started_at,
+    blocks: [{ ...original.blocks[0]!, started_at, ended_at: started_at }],
+  };
+  expect((await send(resumed)).status).toBe(200);
+  expect((await send(original)).status).toBe(200);
+  expect(await (await board()).json()).toMatchObject({ sessions: [{ id: initial!.id, started_at }] });
+  expect(await (await calendar()).json()).toMatchObject({ blocks: [{ started_at }] });
+});
+
 it("keeps_the_title_when_null_is_sent", async () => {
   await put(example);
   const p = fresh();

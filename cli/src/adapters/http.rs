@@ -52,7 +52,21 @@ fn read_limited(resp: &mut ureq::http::Response<ureq::Body>) -> String {
 
 impl Sender for HttpSender {
     fn send(&self, body: &str) -> Result<SendOk, SendError> {
-        self.put("sessions", body)
+        #[derive(Deserialize)]
+        struct Received {
+            #[serde(flatten)]
+            summary: SendOk,
+            import_corrections: Option<usize>,
+        }
+        let received: Received = self.put("sessions", body)?;
+        let corrections = body.matches(r#""import_corrected":true"#).count();
+        if corrections > 0 && received.import_corrections != Some(corrections) {
+            return Err(SendError::Rejected {
+                status: 200,
+                body: r#"{"error":"import_correction_not_acknowledged"}"#.into(),
+            });
+        }
+        Ok(received.summary)
     }
 }
 
@@ -208,6 +222,19 @@ mod tests {
         assert!(lower.contains("cf-access-client-secret: the-secret-value"), "{req}");
         assert!(lower.contains("content-type: application/json"), "{req}");
         assert!(req.ends_with(r#"{"a":1}"#), "{req}");
+    }
+
+    #[test]
+    fn import_correction_requires_worker_acknowledgement() {
+        let request = r#"{"sessions":[{"import_corrected":true}]}"#;
+        for (response, accepted) in [
+            (r#"{"sessions":1,"blocks":1,"rows_changed":3}"#, false),
+            (r#"{"sessions":1,"blocks":1,"rows_changed":3,"import_corrections":1}"#, true),
+        ] {
+            let (url, received) = serve(resp("200 OK", "", response));
+            assert_eq!(sender(url).send(request).is_ok(), accepted);
+            received.join().unwrap();
+        }
     }
 
     #[test]

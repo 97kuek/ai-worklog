@@ -41,7 +41,10 @@ pub struct CollectReport {
     pub sessions_changed: usize,
     pub sessions_sent: usize,
     pub chunks_failed: usize,
+    pub uploads_recovered: usize,
+    pub uploads_pending_retry: usize,
     pub skill_inventories_sent: usize,
+    pub skill_errors: Vec<String>,
     pub names_assigned: usize,
     pub auth_failed: bool,
     pub errors: Vec<String>,
@@ -69,6 +72,7 @@ fn collect_from_home(opts: &CollectOptions, state: &mut State, ledger: &mut Ledg
             .unwrap_or_else(|e| { report.errors.push(format!("cannot read Claude session registry: {e}")); None })
             .unwrap_or_default();
         for b in &mut built {
+            if b.session.blocks.is_empty() { continue; }
             let s = &mut b.session;
             let mut latest = ledger.sessions.get(&b.key).and_then(|e| e.external_status);
             if s.tool == Tool::ClaudeCode && let Some(status) = live.get(&s.native_session_id) {
@@ -245,6 +249,7 @@ impl FileEntry {
         self.offset = 0;
         self.status_scanned = true;
         self.efforts_scanned = true;
+        self.import_scanned = matches!(source, Source::Codex);
         self.claude = None;
         self.codex = None;
         match source {
@@ -325,7 +330,10 @@ fn read_new_lines(opts: &CollectOptions, state: &mut State, report: &mut Collect
         };
         let legacy_efforts = !entry.efforts_scanned
             && !matches!(entry.codex.as_ref().and_then(|st| st.role.as_ref()), Some(CodexRole::Excluded));
-        if opts.rescan || replaced.is_some() || !entry.is_from(&source) || st.len < entry.offset || legacy_main || legacy_efforts {
+        let legacy_imports = matches!(source, Source::Codex) && !entry.import_scanned;
+        if opts.rescan || replaced.is_some() || !entry.is_from(&source) || st.len < entry.offset
+            || legacy_main || legacy_efforts || legacy_imports
+        {
             let mut next = FileEntry { path: entry.path.clone(), ..FileEntry::default() };
             next.reset(&source);
             match next.read_more(&source) {
@@ -410,6 +418,7 @@ fn file_groups(files: &BTreeMap<String, FileEntry>) -> HashMap<String, String> {
 struct Built {
     key: String,
     turn_id: Option<String>,
+    import_corrected: bool,
     review: Option<ReviewContext>,
     session: Session,
     /// 名付けの材料。送らない
@@ -435,7 +444,7 @@ fn build_sessions(opts: &CollectOptions, state: &State, gap_ms: i64) -> Vec<Buil
     for (id, (main, subs)) in claude {
         let Some((_, main)) = main else { continue };
         let Some(session) = merge_claude(Some(main), &subs).and_then(|raw| build_session(raw, gap_ms)) else { continue };
-        out.push(Built { key: format!("claude_code:{id}"), turn_id: main.prompt_id.clone(), review: None, session, user_texts: main.user_texts.clone() });
+        out.push(Built { key: format!("claude_code:{id}"), import_corrected: false, turn_id: main.prompt_id.clone(), review: None, session, user_texts: main.user_texts.clone() });
     }
 
     // Codex：同じ thread_id のファイルが2つあれば（move でなく copy）、読み進んだ方だけ使う
@@ -448,13 +457,20 @@ fn build_sessions(opts: &CollectOptions, state: &State, gap_ms: i64) -> Vec<Buil
         }
     }
     let files: Vec<&CodexFileState> = threads.values().map(|(_, st)| *st).collect();
-    for raw in merge_codex(&files, &read_thread_titles(&opts.codex_dir)) {
+    for mut raw in merge_codex(&files, &read_thread_titles(&opts.codex_dir)) {
         let Some((_, main)) = threads.get(raw.native_session_id.as_str()) else { continue };
         let review = main.active_review().cloned();
         let user_texts = main.user_texts.clone();
         let key = format!("codex:{}", raw.native_session_id);
-        let Some(session) = build_session(raw, gap_ms) else { continue };
-        out.push(Built { key, turn_id: main.turn_id.clone(), review, session, user_texts });
+        let import_only = raw.activity.is_empty() && main.first_import_at.is_some();
+        if import_only {
+            raw.activity.extend(main.first_import_at);
+        }
+        let Some(mut session) = build_session(raw, gap_ms) else { continue };
+        if import_only {
+            session.blocks.clear();
+        }
+        out.push(Built { key, import_corrected: main.first_import_at.is_some(), turn_id: main.turn_id.clone(), review, session, user_texts });
     }
 
     out.sort_by(|a, b| a.session.started_at.cmp(&b.session.started_at).then_with(|| a.key.cmp(&b.key)));
@@ -483,6 +499,7 @@ fn name_sessions(namer: &dyn Namer, rule: &NamingRule, ledger: &mut Ledger, buil
     }
     let mut tried = 0;
     for b in built {
+        if b.session.blocks.is_empty() { continue; }
         if tried >= rule.max_per_run {
             break;
         }
@@ -535,14 +552,17 @@ fn send_changed(opts: &CollectOptions, ledger: &mut Ledger, built: &[Built], sen
     for b in built {
         let entry = ledger.sessions.get(&b.key);
         let title = entry.and_then(|e| e.title.clone());
-        let fp = session_fingerprint(&Outgoing { session: &b.session, title: title.as_deref() });
+        let fp = session_fingerprint(&Outgoing { import_corrected: b.import_corrected, session: &b.session, title: title.as_deref() });
         if entry.and_then(|e| e.sent_fingerprint) == Some(fp) {
             continue;
         }
         report.sessions_changed += 1;
         // 送ったものより小さくなったら送らない（APIは送られた内容で置き換える）
         let (messages, tokens) = totals(&b.session);
-        if entry.is_some_and(|e| messages < e.sent_messages || tokens < e.sent_tokens) {
+        if entry.is_some_and(|e| {
+            (!b.import_corrected || e.sent_import_correction)
+                && (messages < e.sent_messages || tokens < e.sent_tokens)
+        }) {
             report.errors.push(format!("skipped shrinking session {}", b.key));
             continue;
         }
@@ -552,13 +572,19 @@ fn send_changed(opts: &CollectOptions, ledger: &mut Ledger, built: &[Built], sen
     let blocks: Vec<usize> = targets.iter().map(|(b, _, _)| b.session.blocks.len()).collect();
     let send = |part: &[Target]| {
         let items: Vec<Outgoing> =
-            part.iter().map(|(b, title, _)| Outgoing { session: &b.session, title: title.as_deref() }).collect();
+            part.iter().map(|(b, title, _)| Outgoing { import_corrected: b.import_corrected, session: &b.session, title: title.as_deref() }).collect();
         sender.send(&to_ingest_json(&opts.machine_name, &items))
     };
+    let mut retry_later = Vec::new();
     let mut mark_sent = |part: &[Target], report: &mut CollectReport| {
         for (b, _, fp) in part {
             let entry = ledger.sessions.entry(b.key.clone()).or_default();
             entry.sent_fingerprint = Some(*fp);
+            entry.sent_import_correction = b.import_corrected;
+            if entry.upload_failures > 0 {
+                report.uploads_recovered += 1;
+                entry.upload_failures = 0;
+            }
             (entry.sent_messages, entry.sent_tokens) = totals(&b.session);
         }
         report.sessions_sent += part.len();
@@ -590,16 +616,33 @@ fn send_changed(opts: &CollectOptions, ledger: &mut Ledger, built: &[Built], sen
                             break 'chunks;
                         }
                         Err(SendError::Rejected { status, body }) => report.errors.push(rejected(&one[0].0.key, status, &body)),
-                        Err(e) => report.errors.push(describe(&e, 1)),
+                        Err(e) => {
+                            retry_later.push(one[0].0.key.as_str());
+                            report.errors.push(describe(&e, 1));
+                        }
                     }
                 }
             }
             Err(e) => {
                 report.chunks_failed += 1;
+                retry_later.extend(part.iter().map(|(b, _, _)| b.key.as_str()));
                 report.errors.push(describe(&e, part.len()));
             }
         }
     }
+    const WARN_AFTER_FAILURES: u32 = 2;
+    let mut newly_persistent = 0;
+    for key in retry_later {
+        let entry = ledger.sessions.entry(key.to_owned()).or_default();
+        entry.upload_failures = entry.upload_failures.saturating_add(1);
+        newly_persistent += usize::from(entry.upload_failures == WARN_AFTER_FAILURES);
+    }
+    if newly_persistent > 0 {
+        report.errors.push(format!(
+            "warning: uploads for {newly_persistent} sessions failed on consecutive attempts; Taskfolio will retry"
+        ));
+    }
+    report.uploads_pending_retry = ledger.sessions.values().filter(|entry| entry.upload_failures > 0).count();
 }
 
 type Target<'a> = (&'a Built, Option<String>, u64);
@@ -781,6 +824,70 @@ mod tests {
         }
     }
 
+    #[test]
+    fn corrects_uploaded_import_and_keeps_later_work() {
+        let env = Env::new("import_correction");
+        let path = env.codex().join("sessions/2026/11/20/rollout-a.jsonl");
+        std::fs::write(&path, concat!(
+            "{\"timestamp\":\"2026-11-20T05:00:00.000Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"c1\",\"cwd\":\"/tmp/proj\"}}\n",
+            "{\"timestamp\":\"2026-11-20T05:00:00.010Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n",
+        )).unwrap();
+        let other = env.codex().join("sessions/2026/11/20/rollout-b.jsonl");
+        std::fs::remove_file(other).unwrap();
+        let opts = env.plain();
+        let mut state = State::default();
+        let mut ledger = Ledger::default();
+        let sender = FakeSender::ok();
+        collect(&opts, &mut state, &mut ledger, &sender);
+        assert_eq!(ledger.sessions["codex:c1"].sent_messages, 1);
+
+        let cached = state.files.values_mut().find(|f| f.path == path).unwrap();
+        cached.import_scanned = false;
+        std::fs::write(&path, concat!(
+            "{\"timestamp\":\"2026-11-20T05:00:00.000Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"c1\",\"cwd\":\"/tmp/proj\"}}\n",
+            "{\"timestamp\":\"2026-11-20T05:00:00.001Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"external-import-turn-1\"}}\n",
+            "{\"timestamp\":\"2026-11-20T05:00:00.009Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\"}}\n",
+            "{\"timestamp\":\"2026-11-20T05:00:00.010Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"external-import-turn-1\"}}\n",
+            "{\"timestamp\":\"2026-11-20T05:02:00.001Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"external-import-turn-2\"}}\n",
+            "{\"timestamp\":\"2026-11-20T05:02:00.010Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"external-import-turn-2\"}}\n",
+        )).unwrap();
+        let previous_calls = sender.calls();
+        collect(&opts, &mut state, &mut ledger, &sender);
+        let corrected = &sender.sessions(previous_calls)[0];
+        assert_eq!(corrected["import_corrected"], true);
+        assert_eq!(corrected["blocks"], serde_json::json!([]));
+        assert_eq!(ledger.sessions["codex:c1"].sent_messages, 0);
+
+        let previous_calls = sender.calls();
+        collect(&opts, &mut state, &mut ledger, &sender);
+        assert_eq!(sender.calls(), previous_calls);
+        append(&path, "{\"timestamp\":\"2026-11-20T06:00:00.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n");
+        collect(&opts, &mut state, &mut ledger, &sender);
+        let resumed = &sender.sessions(previous_calls)[0];
+        assert_eq!(resumed["import_corrected"], true);
+        assert_eq!(resumed["blocks"].as_array().unwrap().len(), 1);
+        assert_eq!(resumed["blocks"][0]["started_at"], "2026-11-20T06:00:00.000Z");
+    }
+
+    #[test]
+    fn reports_consecutive_upload_failure_once_and_records_recovery() {
+        let env = Env::new("upload_retry_warning");
+        let opts = env.plain();
+        let mut state = State::default();
+        let mut ledger = Ledger::default();
+        let sender = FakeSender::with((0..3).map(|_| Err(SendError::Server(502))).collect());
+        let first = collect(&opts, &mut state, &mut ledger, &sender);
+        assert!(first.uploads_pending_retry > 0);
+        assert!(!first.errors.iter().any(|e| e.starts_with("warning: uploads")));
+        let second = collect(&opts, &mut state, &mut ledger, &sender);
+        assert!(second.errors.iter().any(|e| e.starts_with("warning: uploads")));
+        let third = collect(&opts, &mut state, &mut ledger, &sender);
+        assert!(!third.errors.iter().any(|e| e.starts_with("warning: uploads")));
+        let recovered = collect(&opts, &mut state, &mut ledger, &sender);
+        assert_eq!(recovered.uploads_recovered, first.uploads_pending_retry);
+        assert_eq!(recovered.uploads_pending_retry, 0);
+    }
+
     struct FakeNamer {
         outcome: NameOutcome,
         calls: Cell<usize>,
@@ -834,7 +941,7 @@ mod tests {
             gap_minutes: 30,
             now: ts("2026-11-22T00:00:00.000Z"),
         });
-        let items: Vec<Outgoing> = scanned.iter().map(|s| Outgoing { session: s, title: None }).collect();
+        let items: Vec<Outgoing> = scanned.iter().map(|s| Outgoing { import_corrected: false, session: s, title: None }).collect();
         let want: Value = serde_json::from_str(&to_ingest_json(MACHINE, &items)).unwrap();
         assert_eq!(Value::Array(sender.sessions(0)), want["sessions"]);
         assert_eq!(sender.ids(0), ["s1", "c1", "s2"]);
